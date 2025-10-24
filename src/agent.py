@@ -1,0 +1,229 @@
+"""
+Agent module - Handles Travel Buddy agent initialization and chat logic
+
+This module contains the TravelAgent class which manages interactions with the Gemini API
+and maintains the conversation state with users.
+"""
+
+import logging
+from datetime import datetime
+from typing import Optional
+
+from google import genai
+from google.genai import types
+
+from config import (
+    MODEL,
+    TRAVEL_PERSONA,
+    EXIT_COMMANDS,
+    MAX_INPUT_LENGTH,
+    THINKING_BUDGET,
+    ERROR_EMPTY_INPUT,
+    ERROR_INPUT_TOO_LONG,
+)
+
+# Get logger for this module
+logger = logging.getLogger(__name__)
+
+
+class ConversationMessage:
+    """
+    Represents a single message in the conversation history.
+
+    This helps track the flow of the conversation and could be useful for:
+    - Debugging user interactions
+    - Analyzing conversation patterns
+    - Providing context to the LLM in future iterations
+    """
+
+    def __init__(self, role: str, content: str, timestamp: datetime | None = None):
+        """
+        Initialize a conversation message.
+
+        Args:
+            role: Either 'user' or 'assistant'
+            content: The actual message text
+            timestamp: When the message was sent (defaults to now)
+        """
+        self.role = role
+        self.content = content
+        self.timestamp = timestamp or datetime.now()
+
+    def __repr__(self) -> str:
+        """String representation for debugging"""
+        return f"[{self.timestamp.strftime('%H:%M:%S')}] {self.role}: {self.content[:50]}..."
+
+
+class TravelAgent:
+    """
+    Travel Buddy AI Agent untuk membantu perencanaan perjalanan.
+
+    This class handles:
+    - Initialization of the Gemini chat session
+    - Sending messages and receiving responses
+    - Input validation
+    - Conversation history tracking
+    - Error handling with specific exception types
+    """
+
+    def __init__(self, client: genai.Client) -> None:
+        """
+        Inisialisasi Travel Agent.
+
+        Args:
+            client: Initialized Gemini API client
+
+        Raises:
+            ValueError: If client is not properly initialized
+        """
+        if not client:
+            raise ValueError("Gemini client is required")
+
+        self.client = client
+        self.model = MODEL
+        self.chat = None
+        self.conversation_history: list[ConversationMessage] = []
+
+        logger.info(f"Initializing TravelAgent with model: {MODEL}")
+        self._initialize_chat()
+        logger.info("TravelAgent initialized successfully")
+
+    def _initialize_chat(self) -> None:
+        """
+        Inisialisasi chat session dengan Travel Buddy persona.
+
+        This creates a new chat session with:
+        - The Travel Buddy system prompt (persona)
+        - Thinking budget for extended reasoning
+        - Proper configuration for travel assistance
+        """
+        try:
+            # Configure extended thinking for better reasoning
+            # This helps Gemini think through travel planning problems
+            thinking_config = types.ThinkingConfig(
+                thinking_budget=THINKING_BUDGET  # Now configurable from config.py
+            )
+
+            # Main generation configuration
+            config = types.GenerateContentConfig(
+                system_instruction=TRAVEL_PERSONA, thinking_config=thinking_config
+            )
+
+            # Create the chat session
+            self.chat = self.client.chats.create(model=self.model, config=config)
+
+            logger.debug(f"Chat session created with thinking_budget={THINKING_BUDGET}")
+        except Exception as e:
+            logger.error(f"Failed to initialize chat: {e}", exc_info=True)
+            raise
+
+    def send_message(self, user_input: str) -> Optional[str]:
+        """
+        Kirim pesan ke Travel Buddy dan dapatkan respons.
+
+        This method:
+        - Sends the user's message to Gemini
+        - Stores both user and assistant messages in history
+        - Handles specific exception types appropriately
+        - Returns None if any error occurs
+
+        Args:
+            user_input: The user's message to the Travel Buddy
+
+        Returns:
+            The assistant's response, or None if an error occurred
+        """
+        try:
+            logger.debug(f"Sending message: {user_input[:100]}...")
+
+            # Send message to Gemini
+            response = self.chat.send_message(user_input)
+            response_text = response.text
+
+            # Store in conversation history
+            self.conversation_history.append(ConversationMessage("user", user_input))
+            self.conversation_history.append(
+                ConversationMessage("assistant", response_text)
+            )
+
+            logger.info(f"Received response ({len(response_text)} chars)")
+            return response_text
+
+        except Exception as e:
+            # Log with full traceback for debugging
+            logger.error(f"Error sending message: {e}", exc_info=True)
+            return None
+
+    def should_exit(self, user_input: str) -> bool:
+        """
+        Cek apakah pengguna ingin keluar.
+
+        Checks if the user input matches any of the exit commands
+        defined in config.py
+
+        Args:
+            user_input: The user's input string
+
+        Returns:
+            True if user wants to exit, False otherwise
+        """
+        should_exit = user_input.lower() in EXIT_COMMANDS
+        if should_exit:
+            logger.info(f"Exit command detected: {user_input}")
+        return should_exit
+
+    def is_valid_input(self, user_input: str) -> bool:
+        """
+        Validasi input pengguna dengan multiple checks.
+
+        Validates:
+        - Input is not empty or just whitespace
+        - Input doesn't exceed maximum length (prevents prompt injection)
+
+        Args:
+            user_input: The user's input string
+
+        Returns:
+            True if input is valid, False otherwise
+        """
+        stripped = user_input.strip()
+
+        # Check for empty input
+        if not stripped:
+            logger.warning("Empty input received")
+            print(f"❌ {ERROR_EMPTY_INPUT}")
+            return False
+
+        # Check for excessive length (security: prevent prompt injection)
+        if len(stripped) > MAX_INPUT_LENGTH:
+            logger.warning(
+                f"Input too long: {len(stripped)} chars (max: {MAX_INPUT_LENGTH})"
+            )
+            print(f"❌ {ERROR_INPUT_TOO_LONG}")
+            return False
+
+        return True
+
+    def get_conversation_history(self) -> list[ConversationMessage]:
+        """
+        Dapatkan riwayat percakapan.
+
+        This can be useful for:
+        - Debugging conversation flow
+        - Analyzing user behavior
+        - Implementing features like "show chat history"
+
+        Returns:
+            List of ConversationMessage objects in chronological order
+        """
+        return self.conversation_history.copy()
+
+    def clear_history(self) -> None:
+        """
+        Bersihkan riwayat percakapan.
+
+        This could be useful if you want to start a new conversation
+        without reinitializing the agent.
+        """
+        self.conversation_history.clear()
+        logger.info("Conversation history cleared")
