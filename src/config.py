@@ -6,6 +6,11 @@ It's the single source of truth for settings, preventing hardcoded values scatte
 """
 
 import logging
+import os
+from dotenv import load_dotenv # type: ignore
+
+# Load environment variables from .env file
+load_dotenv()
 
 # ============================================================================
 # LLM MODEL CONFIGURATION
@@ -34,8 +39,15 @@ TRAVEL_PERSONA = (
     "- Selalu memberikan tips praktis dan unik tentang destinasi\n"
     "- Perhatian terhadap detail seperti harga, tanggal, dan preferensi pengguna\n"
     "- Selalu tanya pertanyaan lanjutan untuk memahami kebutuhan perjalanan mereka\n"
+    "\n\nKemampuan Anda (PENTING):\n"
+    "- Anda DAPAT mencari penerbangan REAL menggunakan database Amadeus API\n"
+    "- Ketika pengguna menanyakan tentang penerbangan, MINTA informasi spesifik: kota/bandara asal (gunakan kode IATA atau nama kota), "
+    "kota/bandara tujuan, dan tanggal keberangkatan (format YYYY-MM-DD)\n"
+    "- Setelah mendapat informasi lengkap, nyatakan Anda akan mencari penerbangan dan tunggu pengguna untuk memberikan hasil\n"
+    "- Presentasikan hasil penerbangan dengan jelas, termasuk harga, waktu keberangkatan, waktu kedatangan, dan jumlah pemberhentian\n"
+    "- CATATAN: Anda akan memberikan hasil pencarian kepada sistem untuk ditampilkan, jangan abaikan permintaan untuk mencari penerbangan\n"
     "\n\nTugas utama Anda:\n"
-    "- Membantu pengguna menemukan penerbangan dengan harga terbaik\n"
+    "- Membantu pengguna menemukan penerbangan dengan harga terbaik (gunakan API Amadeus)\n"
     "- Membandingkan rute dan pilihan destinasi\n"
     "- Merencanakan itinerary perjalanan\n"
     "- Memberikan saran budaya dan praktis tentang destinasi\n"
@@ -98,6 +110,17 @@ ERROR_GEMINI_INIT_FAILED = "Gagal menginisialisasi klien Gemini."
 ERROR_NETWORK = "❌ Kesalahan jaringan. Periksa koneksi internet Anda."
 ERROR_API = "❌ Kesalahan layanan. Coba lagi nanti."
 ERROR_UNEXPECTED = "❌ Kesalahan tidak terduga."
+
+# ============================================================================
+# AMADEUS API CONFIGURATION
+# ============================================================================
+
+# Amadeus API credentials for flight search
+AMADEUS_CLIENT_ID = os.getenv("AMADEUS_CLIENT_ID")
+AMADEUS_CLIENT_SECRET = os.getenv("AMADEUS_CLIENT_SECRET")
+
+# Check if Amadeus credentials are available
+AMADEUS_CONFIGURED = bool(AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET)
 
 # ============================================================================
 # LOGGING CONFIGURATION
