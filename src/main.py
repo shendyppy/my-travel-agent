@@ -16,7 +16,18 @@ import os
 import sys
 from typing import Optional
 
-from dotenv import load_dotenv
+# Fix encoding for emojis on Windows
+if sys.platform == 'win32':
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+    # Try to enable UTF-8 mode for stdout/stderr on Windows
+    try:
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    except Exception:
+        pass
+
+from dotenv import load_dotenv # type: ignore
 from google import genai
 
 from agent import TravelAgent

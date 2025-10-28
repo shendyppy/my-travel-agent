@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Optional
 
 from google import genai
-from google.genai import types
+from google.genai import types # type: ignore
 
 from config import (
     MODEL,
@@ -20,7 +20,9 @@ from config import (
     THINKING_BUDGET,
     ERROR_EMPTY_INPUT,
     ERROR_INPUT_TOO_LONG,
+    AMADEUS_CONFIGURED,
 )
+from flight_api import search_flights, format_flight_results, format_flight_error
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
@@ -36,7 +38,7 @@ class ConversationMessage:
     - Providing context to the LLM in future iterations
     """
 
-    def __init__(self, role: str, content: str, timestamp: datetime | None = None):
+    def __init__(self, role: str, content: str, timestamp: Optional[datetime] = None):
         """
         Initialize a conversation message.
 
@@ -82,7 +84,7 @@ class TravelAgent:
         self.client = client
         self.model = MODEL
         self.chat = None
-        self.conversation_history: list[ConversationMessage] = []
+        self.conversation_history: list = []
 
         logger.info(f"Initializing TravelAgent with model: {MODEL}")
         self._initialize_chat()
@@ -204,7 +206,7 @@ class TravelAgent:
 
         return True
 
-    def get_conversation_history(self) -> list[ConversationMessage]:
+    def get_conversation_history(self) -> list:
         """
         Dapatkan riwayat percakapan.
 
@@ -227,3 +229,38 @@ class TravelAgent:
         """
         self.conversation_history.clear()
         logger.info("Conversation history cleared")
+
+    def search_and_format_flights(
+        self, origin: str, destination: str, departure_date: str
+    ) -> str:
+        """
+        Search for flights and return formatted results.
+
+        This method integrates with the Amadeus API to search for real flight data.
+
+        Args:
+            origin: IATA code or city name (e.g., 'JKT' for Jakarta)
+            destination: IATA code or city name (e.g., 'DPS' for Bali)
+            departure_date: Date in YYYY-MM-DD format
+
+        Returns:
+            Formatted flight results or error message
+        """
+        if not AMADEUS_CONFIGURED:
+            logger.warning("Amadeus API not configured")
+            return "⚠️ Flight search is not available. Please configure Amadeus API credentials."
+
+        logger.info(
+            f"Flight search requested: {origin} -> {destination} on {departure_date}"
+        )
+
+        result = search_flights(origin, destination, departure_date)
+
+        if result["success"]:
+            formatted = format_flight_results(result["data"])
+            logger.info(f"Flight search successful, found {len(result['data'])} flights")
+            return formatted
+        else:
+            formatted_error = format_flight_error(result["error"])
+            logger.error(f"Flight search failed: {result['error']}")
+            return formatted_error
