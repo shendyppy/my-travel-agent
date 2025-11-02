@@ -22,7 +22,13 @@ from config import (
     ERROR_INPUT_TOO_LONG,
     AMADEUS_CONFIGURED,
 )
-from flight_api import search_flights, format_flight_results, format_flight_error
+from flight_api import (
+    search_flights,
+    format_flight_results,
+    format_flight_error,
+    detect_flight_request,
+    extract_flight_details_from_response,
+)
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
@@ -125,6 +131,8 @@ class TravelAgent:
 
         This method:
         - Sends the user's message to Gemini
+        - Detects if it's a flight search request
+        - Automatically searches flights if detected
         - Stores both user and assistant messages in history
         - Handles specific exception types appropriately
         - Returns None if any error occurs
@@ -133,7 +141,7 @@ class TravelAgent:
             user_input: The user's message to the Travel Buddy
 
         Returns:
-            The assistant's response, or None if an error occurred
+            The assistant's response (possibly with flight results), or None if an error occurred
         """
         try:
             logger.debug(f"Sending message: {user_input[:100]}...")
@@ -141,6 +149,42 @@ class TravelAgent:
             # Send message to Gemini
             response = self.chat.send_message(user_input)
             response_text = response.text
+
+            # Check if this is a flight request
+            if detect_flight_request(user_input) or detect_flight_request(response_text):
+                logger.info("Flight request detected, attempting to extract flight details...")
+
+                # Try to extract flight parameters from response
+                flight_details = extract_flight_details_from_response(response_text)
+
+                if flight_details:
+                    logger.info(
+                        f"Extracted flight details: {flight_details['origin']} -> "
+                        f"{flight_details['destination']} on {flight_details['date']}"
+                    )
+
+                    # Search for flights
+                    flight_results = self.search_and_format_flights(
+                        flight_details["origin"],
+                        flight_details["destination"],
+                        flight_details["date"],
+                    )
+
+                    # Append flight results to response
+                    response_text += "\n\n" + flight_results
+                    logger.info("Flight search results appended to response")
+                else:
+                    logger.warning(
+                        "Flight request detected but could not extract complete details (origin, destination, date)"
+                    )
+                    # Add helpful message to response
+                    response_text += (
+                        "\n\n⚠️ **Note:** Untuk mencari penerbangan, saya butuh informasi:\n"
+                        "- **Asal** (misal: Jakarta/JKT)\n"
+                        "- **Tujuan** (misal: Penang/PEN)\n"
+                        "- **Tanggal keberangkatan** (format: YYYY-MM-DD atau \"15 Desember 2025\")\n\n"
+                        "Bisa ulangi request dengan info lengkap? Terima kasih! 😊"
+                    )
 
             # Store in conversation history
             self.conversation_history.append(ConversationMessage("user", user_input))
