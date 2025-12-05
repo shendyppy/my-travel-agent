@@ -3,6 +3,10 @@ Flight API module - Handles Amadeus API integration for flight search
 
 This module provides functions to search flights, parse results, and format
 them for display in the travel agent.
+
+HINT:
+This file is the "brain" for finding flight tickets. It talks to a service called "Amadeus"
+which is like a giant database of real-time flight info used by travel agencies.
 """
 
 import logging
@@ -11,6 +15,8 @@ from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 import requests # type: ignore
 
+# HINT: We use 'try-except' here because sometimes the 'amadeus' library might not be installed.
+# This prevents the whole program from crashing just because one library is missing.
 try:
     from amadeus import Client, ResponseError # type: ignore
 except ImportError:
@@ -20,7 +26,13 @@ except ImportError:
 from config import AMADEUS_CLIENT_ID, AMADEUS_CLIENT_SECRET, AMADEUS_CONFIGURED
 
 # Get logger for this module
+# HINT: Logging is better than 'print()' because it can save errors to a file
+# and lets us control how much detail we want to see (INFO, WARNING, ERROR).
 logger = logging.getLogger(__name__)
+
+# --- CACHE & DATABASES ---
+# HINT: "Caching" means saving a result so we don't have to ask for it again.
+# It makes the program faster and saves money on API calls.
 
 # Cache for exchange rates (to avoid repeated API calls)
 _exchange_rate_cache: Dict[str, float] = {}
@@ -43,27 +55,14 @@ _AMADEUS_CARRIER_CODES = {
 def _load_airlines_database() -> Dict[str, list]:
     """
     Load airline database from OpenFlights CSV file
-
-    Format: Airline ID,Name,IATA,ICAO,Callsign,Country,Active
-    Index by both IATA (2-letter like 'GA') and ICAO (3-letter like 'GIA')
-
-    Returns dictionary with structure:
-    {
-        "GA": [  # IATA code
-            {"name": "Garuda Indonesia", "country": "Indonesia", "iata": "GA", "icao": "GIA"},
-            ...
-        ],
-        "GIA": [  # ICAO code (also indexed)
-            {"name": "Garuda Indonesia", "country": "Indonesia", "iata": "GA", "icao": "GIA"},
-            ...
-        ]
-    }
-
-    Returns:
-        Dictionary mapping both IATA and ICAO codes to list of airline info dicts
+    
+    HINT: This function reads a big text file (CSV) that contains info about all airlines.
+    We need this because the Amadeus API sometimes only gives us a code like "GA",
+    and we want to show "Garuda Indonesia" to the user.
     """
     global _airlines_db
 
+    # HINT: If we already loaded the data, don't do it again! (Caching)
     if _airlines_db is not None:
         return _airlines_db
 
@@ -74,76 +73,80 @@ def _load_airlines_database() -> Dict[str, list]:
         import csv
 
         # Path to airlines database
+        # HINT: __file__ is the path to THIS script. We go up one folder (..) then into 'data'.
         db_path = os.path.join(os.path.dirname(__file__), "..", "data", "airlines.dat")
 
         if not os.path.exists(db_path):
             logger.warning(f"Airlines database not found at {db_path}")
             return _airlines_db
 
+        # EXPLANATION: We open the file and read it line by line.
         with open(db_path, "r", encoding="utf-8") as f:
-            # Use CSV reader to properly handle quoted fields
             reader = csv.reader(f)
             for row in reader:
+                # Skip broken lines
                 if len(row) < 7:
                     continue
 
                 try:
-                    # Extract fields
-                    # Format: [0]=ID, [1]=Name, [2]=IATA, [3]=ICAO, [4]=Callsign, [5]=Country, [6]=Active
-                    airline_id = row[0].strip()
+                    # Extract fields from the CSV row
+                    # The file format is: ID, Name, IATA, ICAO, Callsign, Country, Active
                     airline_name = row[1].strip()
-                    iata_code = row[2].strip()
-                    icao_code = row[3].strip()
-                    callsign = row[4].strip()
+                    iata_code = row[2].strip()  # e.g., "GA"
+                    icao_code = row[3].strip()  # e.g., "GIA"
                     country = row[5].strip()
                     active = row[6].strip()
 
-                    # Skip if no IATA and ICAO codes, or if they're NULL markers
+                    # Skip if codes are missing or weird ("\N" means null in this DB)
                     if (not iata_code or iata_code == "\\N") and (not icao_code or icao_code == "\\N"):
                         continue
 
-                    # Create airline info dict
+                    # Create a simple dictionary for this airline
                     airline_info = {
-                        "id": airline_id,
                         "name": airline_name,
-                        "iata": iata_code if iata_code != "\\N" else None,
-                        "icao": icao_code if icao_code != "\\N" else None,
-                        "callsign": callsign if callsign != "\\N" else None,
                         "country": country if country != "\\N" else None,
                         "active": active == "Y",
                     }
 
-                    # Index by IATA code if available
+                    # HINT: We save the airline info under BOTH its IATA code (GA) and ICAO code (GIA)
+                    # so we can find it easily later no matter which code we have.
+                    
+                    # Index by IATA code
                     if iata_code and iata_code != "\\N":
                         if iata_code not in _airlines_db:
                             _airlines_db[iata_code] = []
                         _airlines_db[iata_code].append(airline_info)
 
-                    # Also index by ICAO code if available and different from IATA
+                    # Index by ICAO code
                     if icao_code and icao_code != "\\N" and icao_code != iata_code:
                         if icao_code not in _airlines_db:
                             _airlines_db[icao_code] = []
                         _airlines_db[icao_code].append(airline_info)
 
-                except (IndexError, ValueError) as e:
+                except (IndexError, ValueError):
                     continue
 
-        logger.info(
-            f"Loaded airlines from OpenFlights database: {len(_airlines_db)} unique codes (IATA + ICAO)"
-        )
+        logger.info(f"Loaded airlines database: {len(_airlines_db)} codes")
         return _airlines_db
 
     except Exception as e:
-        logger.error(f"Error loading airlines database: {e}", exc_info=True)
+        logger.error(f"Error loading airlines database: {e}")
         _airlines_db = {}
         return _airlines_db
 
 
 class AmadeusClient:
-    """Wrapper for Amadeus API client"""
+    """
+    Wrapper for Amadeus API client
+    
+    HINT: This class handles the connection to Amadeus.
+    It checks if you have the API keys set up correctly in your .env file.
+    """
 
     def __init__(self):
         """Initialize Amadeus client with credentials from environment"""
+        
+        # Check if keys are in .env
         if not AMADEUS_CONFIGURED:
             logger.warning(
                 "Amadeus API not configured. Set AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET in .env"
@@ -151,12 +154,14 @@ class AmadeusClient:
             self.client = None
             return
 
+        # Check if library is installed
         if Client is None:
             logger.error("amadeus package not installed. Run: pip install amadeus")
             self.client = None
             return
 
         try:
+            # EXPLANATION: This is where we actually log in to Amadeus.
             self.client = Client(
                 client_id=AMADEUS_CLIENT_ID, client_secret=AMADEUS_CLIENT_SECRET
             )
@@ -175,20 +180,9 @@ def search_flights(
 ) -> Dict[str, Any]:
     """
     Search for flights using Amadeus API
-
-    Args:
-        origin: IATA code (e.g., 'JKT' for Jakarta) or city name
-        destination: IATA code (e.g., 'DPS' for Denpasar/Bali) or city name
-        departure_date: Date in YYYY-MM-DD format
-        adults: Number of adult passengers (default: 1)
-
-    Returns:
-        Dictionary with flight data or error message:
-        {
-            "success": bool,
-            "data": list of flights or None,
-            "error": error message if failed
-        }
+    
+    HINT: This is the main function! It takes where you are (origin), where you want to go (destination),
+    and when (date), and asks Amadeus for a list of flights.
     """
     amadeus = AmadeusClient()
 
@@ -208,7 +202,8 @@ def search_flights(
             f"Searching flights from {origin} to {destination} on {departure_date}"
         )
 
-        # Call Amadeus Flight Offers Search API
+        # EXPLANATION: This is the actual API call to Amadeus.
+        # We ask for 'flight_offers_search' which gives us ticket prices and schedules.
         response = amadeus.client.shopping.flight_offers_search.get(
             originLocationCode=origin,
             destinationLocationCode=destination,
@@ -227,28 +222,24 @@ def search_flights(
         return {"success": True, "data": response.data, "error": None}
 
     except ResponseError as error:
+        # HINT: If something goes wrong (like bad internet or wrong airport code),
+        # Amadeus throws a 'ResponseError'. We catch it here to explain what happened.
         logger.error(f"Amadeus API error: {error}", exc_info=True)
         error_message = str(error)
 
-        # Parse common error messages
+        # Parse common error messages to be more friendly
         if "not a valid" in error_message.lower() or "invalid" in error_message.lower():
-            return {
-                "success": False,
-                "data": None,
-                "error": f"Invalid airport code. Please use valid IATA codes (e.g., JKT, DPS, SIN, BKK)",
-            }
+            friendly_error = "Invalid airport code. Please use valid IATA codes (e.g., JKT, DPS, SIN, BKK)"
         elif "unauthorized" in error_message.lower():
-            return {
-                "success": False,
-                "data": None,
-                "error": "Amadeus authentication failed. Check your API credentials.",
-            }
+            friendly_error = "Amadeus authentication failed. Check your API credentials."
         else:
-            return {
-                "success": False,
-                "data": None,
-                "error": f"Flight search failed: {error_message}",
-            }
+            friendly_error = f"Flight search failed: {error_message}"
+            
+        return {
+            "success": False,
+            "data": None,
+            "error": friendly_error,
+        }
 
     except Exception as e:
         logger.error(f"Unexpected error during flight search: {e}", exc_info=True)
@@ -261,20 +252,15 @@ def search_flights(
 
 def get_exchange_rate(from_currency: str, to_currency: str = "IDR") -> Optional[float]:
     """
-    Get exchange rate from one currency to another using exchangerate-api.com
-
-    Args:
-        from_currency: Source currency code (e.g., 'EUR')
-        to_currency: Target currency code (default: 'IDR')
-
-    Returns:
-        Exchange rate as float, or None if API call fails
+    Get exchange rate from one currency to another
+    
+    HINT: Amadeus often gives prices in EUR or USD. We want to show Rupiah (IDR).
+    This function asks a free API "how much is 1 EUR in IDR today?"
     """
     cache_key = f"{from_currency}_{to_currency}"
 
     # Check cache first
     if cache_key in _exchange_rate_cache:
-        logger.debug(f"Using cached exchange rate: {cache_key}")
         return _exchange_rate_cache[cache_key]
 
     try:
@@ -287,37 +273,23 @@ def get_exchange_rate(from_currency: str, to_currency: str = "IDR") -> Optional[
         if to_currency in data.get("rates", {}):
             rate = data["rates"][to_currency]
             _exchange_rate_cache[cache_key] = rate
-            logger.info(f"Exchange rate {from_currency} to {to_currency}: {rate}")
             return rate
         else:
             logger.warning(f"Currency {to_currency} not found in exchange rates")
             return None
 
-    except requests.exceptions.RequestException as e:
-        logger.warning(f"Failed to fetch exchange rate: {e}")
-        # Fallback to cached or approximate rate
-        return None
     except Exception as e:
-        logger.error(f"Error getting exchange rate: {e}", exc_info=True)
+        # HINT: If we can't get the rate, we just return None.
+        # The main code will handle this by showing the original currency (e.g. "EUR 500").
+        logger.warning(f"Failed to fetch exchange rate: {e}")
         return None
 
 
 def _load_airports_database() -> Dict[str, str]:
     """
     Load airport database from OpenFlights CSV file
-
-    Format: Airport ID,Name,City,Country,IATA,ICAO,Latitude,Longitude,Altitude,Timezone,DST,Timezone DB,Type,Source
-
-    Returns dictionary mapping IATA codes to countries:
-    {
-        "JKT": "Indonesia",
-        "CGK": "Indonesia",
-        "DPS": "Indonesia",
-        ...
-    }
-
-    Returns:
-        Dictionary mapping IATA codes to country names
+    
+    HINT: This loads another big text file (airports.dat) to map codes like "CGK" to "Indonesia".
     """
     global _airports_db
 
@@ -330,7 +302,6 @@ def _load_airports_database() -> Dict[str, str]:
         import os
         import csv
 
-        # Path to airports database
         db_path = os.path.join(os.path.dirname(__file__), "..", "data", "airports.dat")
 
         if not os.path.exists(db_path):
@@ -338,19 +309,17 @@ def _load_airports_database() -> Dict[str, str]:
             return _airports_db
 
         with open(db_path, "r", encoding="utf-8") as f:
-            # Use CSV reader to properly handle quoted fields
             reader = csv.reader(f)
             for row in reader:
                 if len(row) < 5:
                     continue
 
                 try:
-                    # Format: ID,Name,City,Country,IATA,ICAO,...
-                    # Fields: [0]=ID, [1]=Name, [2]=City, [3]=Country, [4]=IATA, [5]=ICAO, ...
-                    iata_code = row[4].strip()
+                    # Format: ID, Name, City, Country, IATA, ICAO...
                     country = row[3].strip()
+                    iata_code = row[4].strip()
 
-                    # Skip if no IATA code or if it's empty
+                    # Skip if no IATA code
                     if not iata_code or iata_code == "\\N":
                         continue
 
@@ -364,7 +333,7 @@ def _load_airports_database() -> Dict[str, str]:
         return _airports_db
 
     except Exception as e:
-        logger.error(f"Error loading airports database: {e}", exc_info=True)
+        logger.error(f"Error loading airports database: {e}")
         _airports_db = {}
         return _airports_db
 
@@ -399,43 +368,35 @@ def _get_country_from_airport(airport_code: str) -> Optional[str]:
 
 def get_airline_name(airline_code: str, origin: Optional[str] = None, destination: Optional[str] = None) -> str:
     """
-    Get full airline name from airline code with context-aware selection
-
-    Strategy:
-    1. Cache (fast)
-    2. Amadeus API (has carrier codes like OD, ID that OpenFlights doesn't have)
-    3. OpenFlights database (fallback for standard IATA codes)
-    4. Match by destination country if needed
-    5. Return code itself as final fallback
-
-    Args:
-        airline_code: Airline code (e.g., 'GA', 'OD', 'ID')
-        origin: Origin airport code (e.g., 'JKT') for context
-        destination: Destination airport code (e.g., 'BKK') for context
-
-    Returns:
-        Airline name or the code itself if not found
+    Get full airline name from airline code
+    
+    HINT: This function is a bit complex because finding an airline name isn't always easy.
+    Sometimes "ID" means "Batik Air", sometimes it might mean something else in another country.
+    
+    STRATEGY:
+    1. Check our fast cache (memory).
+    2. Check Amadeus special codes (like OD, ID, JT).
+    3. Ask Amadeus API directly.
+    4. Check our big OpenFlights database.
+    5. If all else fails, just return the code (e.g. "GA").
     """
     if not airline_code:
         return "Unknown Airline"
 
     airline_code = airline_code.strip().upper()
-
-    # Create cache key including context
     cache_key = f"{airline_code}_{origin}_{destination}"
 
-    # Check cache first
+    # 1. Check cache first
     if cache_key in _airline_name_cache:
         return _airline_name_cache[cache_key]
 
-    # Check Amadeus carrier codes mapping (these are not in OpenFlights)
+    # 2. Check Amadeus carrier codes mapping (these are not in OpenFlights)
     if airline_code in _AMADEUS_CARRIER_CODES:
         name = _AMADEUS_CARRIER_CODES[airline_code]
         _airline_name_cache[cache_key] = name
-        logger.debug(f"Found {airline_code} in Amadeus carrier codes: {name}")
         return name
 
-    # Try Amadeus API as backup (if configured)
+    # 3. Try Amadeus API as backup (if configured)
     try:
         if AMADEUS_CONFIGURED and Client:
             amadeus = AmadeusClient()
@@ -446,12 +407,11 @@ def get_airline_name(airline_code: str, origin: Optional[str] = None, destinatio
                 if response.data:
                     name = response.data[0].get("businessName", airline_code)
                     _airline_name_cache[cache_key] = name
-                    logger.info(f"Got airline name from Amadeus: {airline_code} -> {name}")
                     return name
     except Exception as e:
-        logger.debug(f"Failed to get airline name from Amadeus: {e}")
+        pass # It's okay if this fails, we have more backups.
 
-    # Fallback: Try OpenFlights database with context-aware selection
+    # 4. Fallback: Try OpenFlights database
     try:
         airlines_db = _load_airlines_database()
         if airline_code in airlines_db:
@@ -461,68 +421,42 @@ def get_airline_name(airline_code: str, origin: Optional[str] = None, destinatio
             if len(airline_list) == 1:
                 name = airline_list[0]["name"]
                 _airline_name_cache[cache_key] = name
-                logger.debug(f"Found {airline_code} in OpenFlights DB: {name}")
                 return name
 
-            # Multiple airlines with same code - use context to pick best match
+            # EXPLANATION: If multiple airlines have the same code, we try to guess
+            # based on where the flight is going (origin/destination).
+            # For example, if flying from Indonesia, "ID" is probably Batik Air.
+            
             origin_country = _get_country_from_airport(origin) if origin else None
             dest_country = _get_country_from_airport(destination) if destination else None
-
-            logger.debug(
-                f"Multiple airlines found for {airline_code}: {[a['name'] for a in airline_list]}, "
-                f"origin_country={origin_country}, dest_country={dest_country}"
-            )
-
-            # Priority 1: Active airlines from origin/destination countries
+            
             relevant_countries = {origin_country, dest_country}
             relevant_countries.discard(None)
 
+            # Look for an airline from the relevant countries
             for airline in airline_list:
-                # Check if country is valid (not empty, not placeholder values)
                 country = airline.get("country", "")
-                is_valid_country = country and country not in ["", "N/A", None] and len(country) > 2
-
-                if airline["active"] and is_valid_country and country in relevant_countries:
+                if airline["active"] and country in relevant_countries:
                     name = airline["name"]
                     _airline_name_cache[cache_key] = name
-                    logger.debug(
-                        f"Found {airline_code} in OpenFlights DB (active + context match): {name} ({country})"
-                    )
                     return name
 
-            # Priority 2: Any active airline (even without country match)
+            # If no match, just take the first active one
             for airline in airline_list:
                 if airline["active"]:
                     name = airline["name"]
                     _airline_name_cache[cache_key] = name
-                    logger.debug(f"Found {airline_code} in OpenFlights DB (active): {name}")
                     return name
-
-            # Priority 3: Match by country only
-            for airline in airline_list:
-                country = airline.get("country", "")
-                is_valid_country = country and country not in ["", "N/A", None] and len(country) > 2
-                if is_valid_country and country in relevant_countries:
-                    name = airline["name"]
-                    _airline_name_cache[cache_key] = name
-                    logger.debug(
-                        f"Found {airline_code} in OpenFlights DB (context match): {name} ({country})"
-                    )
-                    return name
-
-            # Fallback: First in list
+            
+            # If no active ones, just take the first one
             name = airline_list[0]["name"]
             _airline_name_cache[cache_key] = name
-            logger.debug(
-                f"Found {airline_code} in OpenFlights DB (first match): {name}"
-            )
             return name
 
     except Exception as e:
         logger.warning(f"Error looking up airline in OpenFlights DB: {e}")
 
-    # Final fallback: return the code itself
-    logger.debug(f"Could not find airline name for code: {airline_code}")
+    # 5. Final fallback: return the code itself
     _airline_name_cache[cache_key] = airline_code
     return airline_code
 
@@ -563,9 +497,105 @@ def format_duration(duration_str: str) -> str:
 
         return " ".join(parts) if parts else "N/A"
 
+        return " ".join(parts) if parts else "N/A"
+
     except Exception as e:
         logger.warning(f"Error parsing duration {duration_str}: {e}")
         return duration_str
+
+
+def parse_duration_to_minutes(duration_str: str) -> int:
+    """
+    Convert ISO 8601 duration to minutes for comparison
+    
+    Args:
+        duration_str: Duration in ISO format (e.g., 'PT1H50M')
+        
+    Returns:
+        Total minutes (int)
+    """
+    try:
+        pattern = r"P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?"
+        match = re.match(pattern, duration_str)
+        
+        if not match:
+            return 999999 # Return huge number if invalid so it's not picked as fastest
+            
+        years, months, days, hours, minutes, seconds = match.groups()
+        
+        total_minutes = 0
+        if days: total_minutes += int(days) * 24 * 60
+        if hours: total_minutes += int(hours) * 60
+        if minutes: total_minutes += int(minutes)
+        
+        return total_minutes
+    except Exception:
+        return 999999
+
+
+def generate_flight_recommendation(flight_data: list) -> str:
+    """
+    Analyze flights and generate recommendations
+    
+    Args:
+        flight_data: List of flight offers
+        
+    Returns:
+        Formatted recommendation string
+    """
+    if not flight_data:
+        return ""
+        
+    try:
+        # We only look at the top 5 results to be fair
+        candidates = flight_data[:5]
+        
+        cheapest_flight = None
+        cheapest_price = float('inf')
+        
+        fastest_flight = None
+        fastest_duration = float('inf')
+        
+        # Analyze each flight
+        for i, flight in enumerate(candidates, 1):
+            # Check Price
+            try:
+                price = float(flight.get("price", {}).get("grandTotal", float('inf')))
+                if price < cheapest_price:
+                    cheapest_price = price
+                    cheapest_flight = i
+            except (ValueError, TypeError):
+                pass
+                
+            # Check Duration (first leg)
+            try:
+                duration_str = flight.get("itineraries", [])[0].get("duration", "")
+                duration_mins = parse_duration_to_minutes(duration_str)
+                if duration_mins < fastest_duration:
+                    fastest_duration = duration_mins
+                    fastest_flight = i
+            except (IndexError, AttributeError):
+                pass
+
+        # Build Recommendation Text
+        recs = []
+        recs.append("\n💡 **Rekomendasi Travel Buddy:**")
+        
+        if cheapest_flight:
+            recs.append(f"• **Paling Hemat**: Opsi {cheapest_flight} (Harga termurah)")
+            
+        if fastest_flight and fastest_flight != cheapest_flight:
+            recs.append(f"• **Paling Cepat**: Opsi {fastest_flight} (Durasi terpendek)")
+            
+        # "Best Value" logic: If cheapest is also fastest, it's the best!
+        if cheapest_flight == fastest_flight and cheapest_flight is not None:
+             recs.append(f"• **TERBAIK**: Opsi {cheapest_flight} (Menang di harga DAN waktu! 🔥)")
+        
+        return "\n".join(recs) + "\n"
+
+    except Exception as e:
+        logger.error(f"Error generating recommendation: {e}")
+        return ""
 
 
 def get_airline_name_safe(airline_code: str, origin: Optional[str] = None, destination: Optional[str] = None) -> str:
@@ -593,14 +623,10 @@ def get_airline_name_safe(airline_code: str, origin: Optional[str] = None, desti
 def format_flight_results(flight_data: list) -> str:
     """
     Format flight search results for display
-
-    Converts prices to IDR and shows airline names instead of codes.
-
-    Args:
-        flight_data: Raw flight data from Amadeus API
-
-    Returns:
-        Formatted string with flight information in IDR with airline names
+    
+    HINT: The data we get from Amadeus is a list of dictionaries (JSON).
+    It's very nested and hard to read. This function picks out the important parts
+    (price, time, airline) and makes a nice text string to show the user.
     """
     if not flight_data:
         return "No flights found for this route."
@@ -610,21 +636,22 @@ def format_flight_results(flight_data: list) -> str:
     # Show top 5 results
     for i, flight in enumerate(flight_data[:5], 1):
         try:
-            # Extract price
+            # --- 1. GET PRICE ---
+            # The price is usually in EUR or USD. We try to convert it to IDR.
             price = flight.get("price", {})
             total_price = price.get("grandTotal", "N/A")
             currency = price.get("currency", "EUR")
 
-            # Convert to IDR if needed
             price_idr = total_price
+            
+            # EXPLANATION: If it's not IDR, we try to convert it.
             if currency != "IDR" and total_price != "N/A":
                 try:
                     rate = get_exchange_rate(currency, "IDR")
                     if rate:
                         price_idr = float(total_price) * rate
-                        price_idr = f"Rp {price_idr:,.0f}"
+                        price_idr = f"Rp {price_idr:,.0f}" # Format as "Rp 1,500,000"
                     else:
-                        # Fallback if exchange rate fails
                         price_idr = f"{currency} {total_price}"
                 except ValueError:
                     price_idr = f"{currency} {total_price}"
@@ -632,45 +659,44 @@ def format_flight_results(flight_data: list) -> str:
                 if price_idr != "N/A":
                     price_idr = f"Rp {float(price_idr):,.0f}"
 
-            # Extract itineraries (journey segments)
+            # --- 2. GET FLIGHT DETAILS ---
+            # "itineraries" is a list of journeys. Usually just one for one-way.
             itineraries = flight.get("itineraries", [])
-
             if not itineraries:
                 continue
 
-            # Get first leg of journey
             first_leg = itineraries[0]
             segments = first_leg.get("segments", [])
-
             if not segments:
                 continue
 
-            # Get departure and arrival info
+            # First segment tells us departure, last segment tells us arrival
             first_segment = segments[0]
             last_segment = segments[-1]
 
             departure = first_segment.get("departure", {})
             arrival = last_segment.get("arrival", {})
 
-            departure_time = departure.get("at", "N/A")
-            arrival_time = arrival.get("at", "N/A")
+            # Format: 2025-12-20T10:00:00
+            departure_time = departure.get("at", "N/A").replace("T", " ")
+            arrival_time = arrival.get("at", "N/A").replace("T", " ")
 
-            # Get origin and destination airport codes for context
-            # The structure is: {"iataCode": "JKT", "at": "2025-12-20T10:00:00"}
-            origin_airport = first_segment.get("departure", {}).get("iataCode", "")
-            dest_airport = last_segment.get("arrival", {}).get("iataCode", "")
+            # --- 3. GET AIRLINE ---
+            # We need the airline code from the first flight segment
+            airline_code = first_segment.get("operating", {}).get("carrierCode", "")
+            if not airline_code:
+                 airline_code = first_segment.get("carrierCode", "")
 
-            # Get airline info and convert code to name (with context)
-            airline = first_segment.get("operating", {})
-            airline_code = airline.get("carrierCode", "")
-
+            # We use our helper function to get the real name
+            origin_airport = departure.get("iataCode", "")
+            dest_airport = arrival.get("iataCode", "")
             airline_name = get_airline_name_safe(airline_code, origin_airport, dest_airport)
 
-            # Calculate duration (ISO 8601 format)
+            # --- 4. DURATION ---
             duration_iso = first_leg.get("duration", "")
             duration_readable = format_duration(duration_iso)
 
-            # Format output
+            # --- 5. BUILD THE STRING ---
             formatted += f"**Option {i}:**\n"
             formatted += f"  💰 Price: {price_idr}\n"
             formatted += f"  ✈️  Departs: {departure_time}\n"
@@ -685,6 +711,10 @@ def format_flight_results(flight_data: list) -> str:
 
     if formatted == "✈️ **Flight Options:**\n\n":
         return "Could not parse flight results. Please try again."
+
+    # Add recommendations at the end
+    recommendation = generate_flight_recommendation(flight_data)
+    formatted += recommendation
 
     return formatted
 
@@ -705,12 +735,9 @@ def format_flight_error(error: str) -> str:
 def detect_flight_request(text: str) -> bool:
     """
     Detect if user is asking about flights
-
-    Args:
-        text: User input or agent response
-
-    Returns:
-        True if flight request detected, False otherwise
+    
+    HINT: We look for keywords like "flight", "ticket", "bali", etc.
+    If we find enough keywords, we assume the user wants to book a flight.
     """
     flight_keywords = [
         "penerbangan",
@@ -742,14 +769,13 @@ def detect_flight_request(text: str) -> bool:
 def extract_airport_code(text: str) -> Optional[str]:
     """
     Extract IATA airport code (3 letters) from text
-
-    Args:
-        text: Text to search
-
-    Returns:
-        Airport code (uppercase) or None
+    
+    HINT: Airport codes are always 3 capital letters (like "CGK").
+    We use 'regex' (regular expressions) to find them.
     """
     # Match 3-letter airport codes
+    # EXPLANATION: \b means "word boundary" (start or end of a word).
+    # [A-Z]{3} means "exactly 3 uppercase letters".
     codes = re.findall(r"\b([A-Z]{3})\b", text)
     if codes:
         return codes[0]
@@ -759,19 +785,9 @@ def extract_airport_code(text: str) -> Optional[str]:
 def extract_date_from_text(text: str) -> Optional[str]:
     """
     Extract date in YYYY-MM-DD format from text
-
-    Supports multiple formats:
-    - YYYY-MM-DD
-    - DD/MM/YYYY or DD-MM-YYYY
-    - "15 Desember 2025" (Indonesian)
-    - "15 December 2025" (English)
-    - Numbers like "2025-12-15" or "15-12-2025"
-
-    Args:
-        text: Text to search
-
-    Returns:
-        Date string in YYYY-MM-DD format or None
+    
+    HINT: Dates can be written in many ways (2025-12-25, 25 Dec, etc.).
+    We try a few common patterns to guess what the user meant.
     """
     # Try to match YYYY-MM-DD format (priority 1)
     date_match = re.search(r"(\d{4})-(\d{2})-(\d{2})", text)
@@ -790,6 +806,7 @@ def extract_date_from_text(text: str) -> Optional[str]:
             return None
 
     # Try to match Indonesian month names (priority 3)
+    # EXPLANATION: We map names like "Januari" to numbers like 1.
     months_id = {
         "januari": 1,
         "februari": 2,
