@@ -1,0 +1,83 @@
+[
+  {
+    "origin": "CGK",
+    "origin_city": "CGK",
+    "destination": "NRT",
+    "destination_city": "NRT",
+    "departure_date": "2026-03-01",
+    "return_date": null,
+    "passengers": 1,
+    "price": 11567109.0,
+    "currency": "IDR",
+    "airline": "Cebu Pacific",
+    "flight_duration": "16h 30m",
+    "stops": 1,
+    "booking_links": {
+      "traveloka": "https://www.traveloka.com/en-id/flight/fullsearch?ap=CGK.NRT&dt=20260301.NA&ps=1.0.0&sc=ECONOMY",
+      "tiketcom": "https://www.tiket.com/pesawat/cari?d=CGK&a=NRT&date=2026-03-01&ret_date=&adult=1&child=0&infant=0",
+      "skyscanner": "https://www.skyscanner.co.id/transport/flights/cgk/nrt/260301/?adults=1&adultsv2=1&children=0&childrenv2=&infants=0"
+    },
+    "booked": false,
+    "booking_reference": null,
+    "search_timestamp": "2025-12-14T19:32:11.070758",
+    "session_id": null,
+    "user_id": null,
+    "budget_per_day": null,
+    "travel_preferences": null,
+    "notes": "Searched in Sakura Peak Season"
+  },
+  {
+    "origin": "CGK",
+    "origin_city": "CGK",
+    "destination": "NRT",
+    "destination_city": "NRT",
+    "departure_date": "2026-03-01",
+    "return_date": null,
+    "passengers": 1,
+    "price": 11567109.0,
+    "currency": "IDR",
+    "airline": "Cebu Pacific",
+    "flight_duration": "16h 30m",
+    "stops": 1,
+    "booking_links": {
+      "traveloka": "https://www.traveloka.com/en-id/flight/fullsearch?ap=CGK.NRT&dt=20260301.NA&ps=1.0.0&sc=ECONOMY",
+      "tiketcom": "https://www.tiket.com/pesawat/cari?d=CGK&a=NRT&date=2026-03-01&ret_date=&adult=1&child=0&infant=0",
+      "skyscanner": "https://www.skyscanner.co.id/transport/flights/cgk/nrt/260301/?adults=1&adultsv2=1&children=0&childrenv2=&infants=0"
+    },
+    "booked": false,
+    "booking_reference": null,
+    "search_timestamp": "2025-12-14T19:35:44.757830",
+    "session_id": null,
+    "user_id": null,
+    "budget_per_day": null,
+    "travel_preferences": null,
+    "notes": "Searched in Sakura Peak Season"
+  },
+  {
+    "origin": "CGK",
+    "origin_city": "CGK",
+    "destination": "SUB",
+    "destination_city": "SUB",
+    "departure_date": "2026-02-03",
+    "return_date": null,
+    "passengers": 1,
+    "price": 1598720.0,
+    "currency": "IDR",
+    "airline": "Garuda Indonesia",
+    "flight_duration": "1h 40m",
+    "stops": 0,
+    "booking_links": {
+      "traveloka": "https://www.traveloka.com/en-id/flight/fullsearch?ap=CGK.SUB&dt=20260203.NA&ps=1.0.0&sc=ECONOMY",
+      "tiketcom": "https://www.tiket.com/pesawat/cari?d=CGK&a=SUB&date=2026-02-03&ret_date=&adult=1&child=0&infant=0",
+      "skyscanner": "https://www.skyscanner.co.id/transport/flights/cgk/sub/260203/?adults=1&adultsv2=1&children=0&childrenv2=&infants=0"
+    },
+    "booked": false,
+    "booking_reference": null,
+    "search_timestamp": "2026-02-02T16:28:50.806310",
+    "session_id": null,
+    "user_id": null,
+    "budget_per_day": null,
+    "travel_preferences": null,
+    "notes": null
+  }
+]

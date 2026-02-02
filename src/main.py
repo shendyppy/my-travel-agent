@@ -28,23 +28,35 @@ if sys.platform == 'win32':
         pass
 
 from dotenv import load_dotenv # type: ignore
-from google import genai
 
-from agent import TravelAgent
-from config import (
-    MODEL,
-    LOG_LEVEL,
-    LOG_FORMAT,
-    LOG_FILE,
-    UI_HEADER,
-    UI_INSTRUCTIONS,
-    UI_EXIT_MESSAGE,
-    UI_THINKING,
-    ERROR_API_KEY_MISSING,
-    ERROR_GEMINI_INIT_FAILED,
-    ERROR_NETWORK,
-    ERROR_API,
-)
+try:
+    from src.agent import TravelAgent
+    from src.config import (
+        LOG_LEVEL,
+        LOG_FORMAT,
+        LOG_FILE,
+        UI_HEADER,
+        UI_INSTRUCTIONS,
+        UI_EXIT_MESSAGE,
+        UI_THINKING,
+        ERROR_API_KEY_MISSING,
+        ERROR_NETWORK,
+        ERROR_API,
+    )
+except ImportError:
+    from agent import TravelAgent
+    from config import (
+        LOG_LEVEL,
+        LOG_FORMAT,
+        LOG_FILE,
+        UI_HEADER,
+        UI_INSTRUCTIONS,
+        UI_EXIT_MESSAGE,
+        UI_THINKING,
+        ERROR_API_KEY_MISSING,
+        ERROR_NETWORK,
+        ERROR_API,
+    )
 
 # ============================================================================
 # LOGGING SETUP
@@ -90,8 +102,8 @@ def setup_logging() -> None:
     # Get logger for this module
     logger = logging.getLogger(__name__)
     logger.info("=" * 80)
-    logger.info("Travel Buddy Application Started")
-    logger.info(f"Model: {MODEL}")
+    logger.info("Budget Travel Agent Application Started")
+    logger.info("Universal LLM Support: Gemini, GLM, OpenAI")
     logger.info("=" * 80)
 
 
@@ -117,54 +129,40 @@ def load_environment() -> None:
     logger.debug("Environment variables loaded")
 
 
-def initialize_client() -> Optional[genai.Client]:
+def check_api_keys() -> Optional[str]:
     """
-    Inisialisasi Gemini API client dengan error handling yang baik.
+    Check if any LLM API key is available and return provider name.
 
     This function:
-    - Loads the API key from environment variables
-    - Validates the API key exists
-    - Creates and returns a Gemini client
-    - Provides helpful error messages if setup fails
+    - Checks for API keys from all supported providers
+    - Returns the first available provider
+    - Provides helpful error messages if no keys found
 
     Returns:
-        genai.Client: Initialized Gemini client, or None if initialization fails
-
-    Raises:
-        SystemExit: If initialization completely fails (not caught)
+        str: Provider name if found, None if none available
     """
     logger = logging.getLogger(__name__)
 
-    try:
-        # Load API key from environment
-        api_key = os.getenv("GEMINI_API_KEY")
+    # Check in order of preference
+    provider_checks = [
+        ("gemini", "GEMINI_API_KEY", "https://makersuite.google.com/app/apikey"),
+        ("glm", "GLM_API_KEY", "https://open.bigmodel.cn/"),
+        ("openai", "OPENAI_API_KEY", "https://platform.openai.com/api-keys"),
+        ("custom", "CUSTOM_API_KEY", None),
+    ]
 
-        # Validate API key exists
-        if not api_key:
-            logger.error("GEMINI_API_KEY not found in environment")
-            print("❌ " + ERROR_API_KEY_MISSING)
-            print("\n💡 Tips: Pastikan:")
-            print("  1. File .env ada di folder project")
-            print("  2. GEMINI_API_KEY sudah diisi dengan API key yang valid")
-            print(
-                "  3. Dapatkan API key dari: https://makersuite.google.com/app/apikey"
-            )
-            return None
+    for provider, env_key, url in provider_checks:
+        if os.getenv(env_key):
+            logger.info(f"Found API key for provider: {provider}")
+            return provider
 
-        # Create and return client
-        client = genai.Client(api_key=api_key)
-        logger.info("Gemini client initialized successfully")
-        return client
-
-    except Exception as e:
-        logger.error(f"Failed to initialize Gemini client: {e}", exc_info=True)
-        # Check if it's a network-related error
-        if "network" in str(e).lower() or "connection" in str(e).lower():
-            print(ERROR_NETWORK)
-        else:
-            print("❌ " + ERROR_GEMINI_INIT_FAILED)
-            print(f"Error details: {e}")
-        return None
+    # No keys found
+    print("❌ " + ERROR_API_KEY_MISSING)
+    print("\n💡 Tips: Set one of these environment variables in your .env file:")
+    for provider, env_key, url in provider_checks:
+        if url:
+            print(f"  - {env_key}: Get from {url}")
+    return None
 
 
 # ============================================================================
@@ -230,12 +228,12 @@ def handle_user_interaction(agent: TravelAgent) -> bool:
 
 def run_travel_agent() -> None:
     """
-    Jalankan Travel Buddy chatbot loop utama.
+    Jalankan Budget Travel Agent dengan universal LLM support.
 
     This is the main application function that:
     1. Displays welcome message
-    2. Initializes the Gemini client
-    3. Creates the Travel Agent
+    2. Checks for available API keys
+    3. Creates the Travel Agent with universal LLM
     4. Runs the conversation loop
     5. Handles graceful shutdown
     """
@@ -246,18 +244,19 @@ def run_travel_agent() -> None:
         print(UI_HEADER)
         print(UI_INSTRUCTIONS)
 
-        # Initialize Gemini client
-        client = initialize_client()
-        if not client:
-            logger.error("Failed to initialize client, exiting")
+        # Check which provider to use
+        provider = check_api_keys()
+        if not provider:
+            logger.error("No API keys found, exiting")
             sys.exit(1)
 
-        # Initialize Travel Agent
+        # Initialize Travel Agent with universal LLM
         try:
-            agent = TravelAgent(client)
+            agent = TravelAgent(provider=provider)
+            print(f"\n✅ Using {provider.title()} as AI provider")
         except Exception as e:
             logger.error(f"Failed to initialize TravelAgent: {e}", exc_info=True)
-            print("❌ Gagal menginisialisasi Travel Buddy. Cek koneksi internet Anda.")
+            print(f"❌ Gagal menginisialisasi Travel Agent dengan {provider}. Cek koneksi internet Anda.")
             sys.exit(1)
 
         # Main conversation loop

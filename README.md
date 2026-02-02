@@ -1,16 +1,27 @@
-# 🌍 Travel Agent AI - Project Guide
+# 🌍 Budget Travel Agent API
 
-> Built with Gemini API | Your personal AI travel companion
+> Universal AI-powered travel assistant with multi-LLM support
 
 ## 📋 Project Overview
 
-**Travel Agent AI** is an intelligent chatbot that helps you find cheap flights, compare routes, and plan travel itineraries. It uses Google's Gemini API to understand your travel needs and provide smart recommendations.
+**Budget Travel Agent** is an intelligent travel assistant that helps users find budget-friendly flights, destinations, and create complete travel packages. Built with universal LLM support - works with Gemini, GLM, OpenAI, and more!
 
 **Why this project?**
-- Learn AI/LLM concepts through real-world application
-- Build a portfolio piece that solves an actual problem
-- Understand how agents work with external APIs
-- Practice Python + API integration
+- 🌍 **Global Reach**: Auto-detects user location worldwide
+- 💰 **Budget-Focused**: Specializes in affordable travel options
+- 🤖 **Universal LLM**: Switch between AI providers easily
+- 🎯 **Smart Features**: Complete trip suggestions with flights + destinations
+- 🔧 **Production Ready**: Optimized for scale with caching and RAG
+
+## ✨ Key Features
+
+- **🗺️ Global Location Detection**: Auto-detect from IP (50+ cities worldwide)
+- **💡 Smart Recommendations**: AI-curated destinations with cost breakdowns
+- **✈️ Complete Packages**: Flight + destination suggestions with per-person pricing
+- **📅 Dynamic Dates**: Smart weekend recommendations (2-month range)
+- **🔄 Multi-LLM Support**: Gemini, GLM, OpenAI, custom providers
+- **⚡ Token Optimized**: RAG implementation for 60% cost reduction
+- **🎨 UI Ready**: Separate frontend/backend architecture
 
 ---
 
