@@ -23,7 +23,10 @@ except ImportError:
     Client = None
     ResponseError = None
 
-from config import AMADEUS_CLIENT_ID, AMADEUS_CLIENT_SECRET, AMADEUS_CONFIGURED
+try:
+    from src.config import AMADEUS_CLIENT_ID, AMADEUS_CLIENT_SECRET, AMADEUS_CONFIGURED
+except ImportError:
+    from config import AMADEUS_CLIENT_ID, AMADEUS_CLIENT_SECRET, AMADEUS_CONFIGURED
 
 # Get logger for this module
 # HINT: Logging is better than 'print()' because it can save errors to a file
@@ -176,10 +179,69 @@ class AmadeusClient:
 
 
 def search_flights(
+    origin: str, destination: str, departure_date: str, adults: int = 1,
+    return_date: str = None, trip_type: str = "oneway"
+) -> Dict[str, Any]:
+    """
+    Search for flights using Google Flights (primary) with Amadeus fallback
+    
+    This function implements a fallback mechanism:
+    1. Try Google Flights API first (if configured and enabled)
+    2. Fall back to Amadeus API if Google Flights fails or is unavailable
+    
+    Args:
+        origin: Origin airport code (e.g., "CGK")
+        destination: Destination airport code (e.g., "NRT")
+        departure_date: Departure date in YYYY-MM-DD format
+        adults: Number of adult passengers (default: 1)
+        return_date: Return date for round-trip (YYYY-MM-DD format, optional)
+        trip_type: "oneway" or "roundtrip" (default: "oneway")
+        
+    Returns:
+        Dictionary with success status, flight data, and error info
+    """
+    try:
+        from src.config import GOOGLE_FLIGHTS_ENABLED, GOOGLE_FLIGHTS_CONFIGURED
+    except ImportError:
+        from config import GOOGLE_FLIGHTS_ENABLED, GOOGLE_FLIGHTS_CONFIGURED
+    
+    # Normalize airport codes (city code -> airport code)
+    origin_normalized = get_airport_from_city_code(origin) or origin
+    destination_normalized = get_airport_from_city_code(destination) or destination
+    
+    # Try Google Flights first (if enabled and configured)
+    if GOOGLE_FLIGHTS_ENABLED and GOOGLE_FLIGHTS_CONFIGURED:
+        try:
+            try:
+                from src.google_flights_api import search_google_flights
+            except ImportError:
+                from google_flights_api import search_google_flights
+            
+            logger.info(f">>> Attempting Google Flights API search ({trip_type})...")
+            result = search_google_flights(
+                origin_normalized, destination_normalized, departure_date, adults,
+                return_date=return_date, trip_type=trip_type
+            )
+            
+            if result["success"] and result.get("data"):
+                logger.info(f"[OK] Google Flights API successful: {len(result.get('data', []))} flights found")
+                return result
+            else:
+                logger.warning(f"Google Flights API returned no data: {result.get('error')}, falling back to Amadeus")
+                
+        except Exception as e:
+            logger.warning(f"Google Flights API error: {e}, falling back to Amadeus")
+    
+    # Fallback to Amadeus API (note: Amadeus doesn't support roundtrip in single call)
+    logger.info("[FALLBACK] Using Amadeus API")
+    return search_amadeus_flights(origin, destination, departure_date, adults)
+
+
+def search_amadeus_flights(
     origin: str, destination: str, departure_date: str, adults: int = 1
 ) -> Dict[str, Any]:
     """
-    Search for flights using Amadeus API
+    Search for flights using Amadeus API (fallback provider)
     
     HINT: This is the main function! It takes where you are (origin), where you want to go (destination),
     and when (date), and asks Amadeus for a list of flights.
@@ -195,8 +257,41 @@ def search_flights(
 
     try:
         # Normalize input to IATA codes (convert to uppercase)
-        origin = origin.upper().strip()
-        destination = destination.upper().strip()
+        # Try to map city names to airport codes if possible (e.g. Jakarta -> CGK)
+        # This fixes the Amadeus 400 error caused by sending city names
+        origin_code = get_airport_from_city_code(origin) or origin.upper().strip()
+        destination_code = get_airport_from_city_code(destination) or destination.upper().strip()
+        
+        # Override with codes
+        origin = origin_code
+        destination = destination_code
+
+        # Validate departure date with user-friendly messages
+        try:
+            departure_dt = datetime.strptime(departure_date, "%Y-%m-%d")
+            today = datetime.now()
+            days_from_now = (departure_dt - today).days
+
+            # Amadeus API typically allows booking 1-330 days in advance
+            if days_from_now < 1:
+                return {
+                    "success": False,
+                    "data": None,
+                    "error": f"📅 Maaf, tanggal {departure_date} sudah lewat. Coba tanggal besok atau setelahnya ya! 😊",
+                }
+            elif days_from_now > 90:
+                # Test environment limitation - suggest searching closer dates
+                return {
+                    "success": False,
+                    "data": None,
+                    "error": f"🔍 Maaf, pencarian tiket terlalu jauh ke depan ({days_from_now} hari dari sekarang). Untuk hasil terbaik, coba cari dalam 3 bulan ke depan ya! Kalau mau planning jangka panjang, bisa cari dekat-dekat tanggal keberangkatan nanti. ✈️",
+                }
+        except ValueError:
+            return {
+                "success": False,
+                "data": None,
+                "error": f"📅 Format tanggal tidak valid. Coba pakai format: TAHUN-BULAN-TANGGAL (contoh: 2026-02-15) ya! 😊",
+            }
 
         logger.info(
             f"Searching flights from {origin} to {destination} on {departure_date}"
@@ -227,14 +322,20 @@ def search_flights(
         logger.error(f"Amadeus API error: {error}", exc_info=True)
         error_message = str(error)
 
-        # Parse common error messages to be more friendly
-        if "not a valid" in error_message.lower() or "invalid" in error_message.lower():
-            friendly_error = "Invalid airport code. Please use valid IATA codes (e.g., JKT, DPS, SIN, BKK)"
+        # Parse common error messages to be more user-friendly
+        error_status = getattr(error, 'response', {}).get('status_code', None) if hasattr(error, 'response') else None
+
+        if error_status == 400:
+            # Bad Request - usually date too far or no data available
+            friendly_error = "🔍 Maaf, belum ada jadwal penerbangan untuk tanggal tersebut. Coba tanggal lain yang lebih dekat ya! Kalau mau, bilang aja 'cari yang paling murah' biar aku carikan tanggal terbaik dalam 7 hari ke depan. ✈️"
+        elif "not a valid" in error_message.lower() or "invalid" in error_message.lower():
+            friendly_error = "🛫 Maaf, kode bandara tidak dikenali. Coba sebutin nama kota atau bandara yang lebih umum ya! (contoh: Jakarta, Bali, Singapore) 😊"
         elif "unauthorized" in error_message.lower():
-            friendly_error = "Amadeus authentication failed. Check your API credentials."
+            friendly_error = "⚠️ Maaf, ada masalah dengan koneksi ke sistem pencarian tiket. Coba lagi dalam beberapa detik ya!"
         else:
-            friendly_error = f"Flight search failed: {error_message}"
-            
+            # Generic error with friendly message
+            friendly_error = f"🔍 Maaf, belum bisa mencari tiket untuk rute/tanggal ini. Bisa coba:\n• Tanggal lain yang lebih dekat\n• Rute lain yang mirip\n• Atau bilang 'cari yang termurah' biar aku carikan tanggal terbaik! ✈️"
+
         return {
             "success": False,
             "data": None,
@@ -246,7 +347,7 @@ def search_flights(
         return {
             "success": False,
             "data": None,
-            "error": f"Flight search failed: {str(e)}",
+            "error": f"⚠️ Maaf, ada masalah saat mencari tiket. Coba lagi dalam beberapa detik ya! Kalau masih error, bilang 'cari yang termurah' biar aku carikan opsi terbaik. 😊",
         }
 
 
@@ -721,7 +822,7 @@ def format_flight_results(flight_data: list) -> str:
 
 def format_flight_error(error: str) -> str:
     """
-    Format error message for display
+    Format error message for display with user-friendly messaging
 
     Args:
         error: Error message from flight search
@@ -729,7 +830,12 @@ def format_flight_error(error: str) -> str:
     Returns:
         Formatted error message
     """
-    return f"❌ Flight search error: {error}\n"
+    # Check if error already has emojis (already formatted)
+    if any(emoji in error for emoji in ["🔍", "📅", "⚠️", "🛫"]):
+        return f"\n{error}\n"
+
+    # Generic error - make it user-friendly
+    return f"\n🔍 **Maaf, belum bisa menemukan penerbangan yang sesuai.**\n\n{error}\n\n💡 **Tips:**\n• Coba tanggal lain yang lebih dekat (1-3 bulan ke depan)\n• Bilang 'cari yang termurah' biar aku carikan tanggal terbaik\n• Atau sebutin kota asal dan tujuan yang lebih spesifik ✈️\n"
 
 
 def detect_flight_request(text: str) -> bool:
@@ -769,26 +875,80 @@ def detect_flight_request(text: str) -> bool:
 def extract_airport_code(text: str) -> Optional[str]:
     """
     Extract IATA airport code (3 letters) from text
-    
+
     HINT: Airport codes are always 3 capital letters (like "CGK").
     We use 'regex' (regular expressions) to find them.
     """
+    # Common airport codes list for validation
+    common_airports = {
+        # Indonesian
+        "CGK", "DPS", "SUB", "JOG", "YIA", "UPG", "BDO", "BTH", "PKU", "PLM",
+        "BPN", "SRG", "LOP", "MDC", "PNK", "KNO", "BTJ", "MDN", "DJJ", "BIK",
+        # International
+        "NRT", "HND", "KIX", "ITM", "SIN", "KUL", "PEN", "JHB", "BKK", "HKT",
+        "CNX", "MNL", "CEB", "SGN", "HAN", "REP", "VTE", "ICN", "GMP", "PUS",
+        "PEK", "PVG", "HKG", "TPE", "KHH", "BOM", "DEL", "CMB", "MLE", "DAC",
+        "CCU", "KTM", "LHE", "ISB", "KHI", "DXB", "DOH", "KWI", "BAH", "RUH",
+        "JED", "CAI", "TLL", "ADD", "NBO", "JRO", "DAR", "LOS", "ACC", "DKR",
+        "JNB", "CPT", "LOS", "ABV", "GBE", "LHR", "LGW", "STN", "LTN", "CDG",
+        "ORY", "AMS", "BRU", "DUS", "FRA", "MUC", "TXL", "ZUR", "GVA", "MXP",
+        "FCO", "VCE", "MAD", "BCN", "LIS", "OPO", "IST", "SAW", "ATH", "SKG",
+        "SOF", "BUD", "PRG", "VIE", "WAW", "BTS", "OTP", "TLV", "CAI", "ADD",
+        "TLV", "AMM", "BEY", "DAM", "ALG", "TUN", "CMN", "RAK", "MRS", "NCE",
+        "LYS", "TLS", "NTE", "BOD", "MLH", "FRA", "MUC", "BER", "HAM", "CGN",
+        "DUS", "STR", "BLL", "CPH", "ARN", "GOT", "OSL", "TRD", "HEL", "TLL",
+        "RIX", "VNO", "KUN", "BEG", "ZAG", "SJJ", "LJU", "PRN", "TGD", "SPU",
+        "DBV", "ZAD", "PUY", "SKG", "ATH", "JMK", "HER", "KVA", "CFU", "ZTH",
+        "RHO", "BJV", "AYT", "DLM", "ESB", "SAW", "ADB", "IST", "KAYS", "MSR",
+        "MLA", "FUE", "LPA", "TFS", "AGP", "ALC", "VLC", "IBZ", "PMI", "MAH",
+        "LPA", "TFS", "FUE", "ACE", "SPC", "VDE", "LPA", "TFS", "FUE", "ACE",
+        "JFK", "EWR", "LGA", "BOS", "BWI", "DCA", "IAD", "ATL", "CLT", "MIA",
+        "FLL", "MCO", "TPA", "MSP", "ORD", "MDW", "DFW", "DAL", "IAH", "HOU",
+        "SLC", "DEN", "PHX", "LAS", "LAX", "SFO", "SAN", "SEA", "PDX", "SMF",
+        "OAK", "SJC", "BUR", "LGB", "HNL", "OGG", "KOA", "LIH", "ITO", "KOA",
+        "YVR", "YYZ", "YUL", "YOW", "YYC", "YEG", "YHZ", "YWG", "YQT", "YFB"
+    }
+
     # Match 3-letter airport codes
     # EXPLANATION: \b means "word boundary" (start or end of a word).
     # [A-Z]{3} means "exactly 3 uppercase letters".
     codes = re.findall(r"\b([A-Z]{3})\b", text)
-    if codes:
-        return codes[0]
+
+    # Filter for valid airport codes
+    valid_codes = [code for code in codes if code in common_airports]
+
+    if valid_codes:
+        return valid_codes[0]
     return None
 
 
 def extract_date_from_text(text: str) -> Optional[str]:
     """
     Extract date in YYYY-MM-DD format from text
-    
+
     HINT: Dates can be written in many ways (2025-12-25, 25 Dec, etc.).
     We try a few common patterns to guess what the user meant.
     """
+    # Handle relative dates like "minggu depan", "besok", etc.
+    text_lower = text.lower()
+
+    # Check for "minggu depan" or similar phrases
+    if any(phrase in text_lower for phrase in ["minggu depan", "next week"]):
+        today = datetime.now()
+        # Get next week's date (7 days from now)
+        next_week = today + timedelta(days=7)
+        return next_week.strftime("%Y-%m-%d")
+
+    # Check for "besok" or "tomorrow"
+    elif any(phrase in text_lower for phrase in ["besok", "tomorrow"]):
+        tomorrow = datetime.now() + timedelta(days=1)
+        return tomorrow.strftime("%Y-%m-%d")
+
+    # Check for "lusa" (day after tomorrow)
+    elif "lusa" in text_lower:
+        day_after = datetime.now() + timedelta(days=2)
+        return day_after.strftime("%Y-%m-%d")
+
     # Try to match YYYY-MM-DD format (priority 1)
     date_match = re.search(r"(\d{4})-(\d{2})-(\d{2})", text)
     if date_match:
@@ -863,6 +1023,211 @@ def extract_date_from_text(text: str) -> Optional[str]:
     return None
 
 
+def extract_date_range_from_text(text: str) -> Optional[tuple]:
+    """
+    Extract date range from text (e.g., "2026-01-17 dan 2026-01-31")
+    
+    Detects patterns with separators: "dan", "sampai", "hingga", "to", "-", "until"
+    
+    Args:
+        text: Input text containing date range
+        
+    Returns:
+        Tuple of (start_date, end_date) in YYYY-MM-DD format, or None
+    """
+    # Common range separators in Indonesian and English
+    separators = [
+        r'\s+dan\s+',      # "2026-01-17 dan 2026-01-31"
+        r'\s+sampai\s+',   # "2026-01-17 sampai 2026-01-31"
+        r'\s+hingga\s+',   # "2026-01-17 hingga 2026-01-31"
+        r'\s+to\s+',       # "2026-01-17 to 2026-01-31"
+        r'\s+until\s+',    # "2026-01-17 until 2026-01-31"
+        r'\s*-\s*',        # "2026-01-17 - 2026-01-31"
+    ]
+    
+    # Try YYYY-MM-DD format first
+    for sep in separators:
+        pattern = rf'(\d{{4}}-\d{{2}}-\d{{2}}){sep}(\d{{4}}-\d{{2}}-\d{{2}})'
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            start_date, end_date = match.groups()
+            logger.info(f"Detected date range: {start_date} to {end_date}")
+            return (start_date, end_date)
+    
+    # Try DD/MM/YYYY format
+    for sep in separators:
+        pattern = rf'(\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{4}}){sep}(\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{4}})'
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            start_str, end_str = match.groups()
+            try:
+                # Parse both dates
+                start_parts = re.split(r'[/-]', start_str)
+                end_parts = re.split(r'[/-]', end_str)
+                
+                start_date = datetime(int(start_parts[2]), int(start_parts[1]), int(start_parts[0]))
+                end_date = datetime(int(end_parts[2]), int(end_parts[1]), int(end_parts[0]))
+                
+                logger.info(f"Detected date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+                return (start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
+            except (ValueError, IndexError):
+                continue
+    
+    return None
+
+
+def extract_passenger_count(text: str) -> int:
+    """
+    Extract passenger count from text (e.g., "2 orang", "3 passengers")
+    
+    Supports:
+    - Numbers: "2 orang", "3 passengers", "4 adults"
+    - Indonesian words: "dua orang", "tiga penumpang"
+    
+    Args:
+        text: Input text containing passenger count
+        
+    Returns:
+        Number of passengers (default: 1)
+    """
+    text_lower = text.lower()
+    
+    # Indonesian number words mapping
+    indonesian_numbers = {
+        'satu': 1, 'dua': 2, 'tiga': 3, 'empat': 4, 'lima': 5,
+        'enam': 6, 'tujuh': 7, 'delapan': 8, 'sembilan': 9, 'sepuluh': 10
+    }
+    
+    # Try to find patterns like "2 orang", "3 passengers", "4 adults"
+    patterns = [
+        r'(\d+)\s*(?:orang|penumpang|passenger|passengers|adult|adults|pax|people)',
+        r'(?:untuk|for)\s+(\d+)\s*(?:orang|penumpang|passenger|passengers|adult|adults)?',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            try:
+                count = int(match.group(1))
+                if 1 <= count <= 9:  # Reasonable passenger count
+                    logger.info(f"Detected passenger count: {count}")
+                    return count
+            except (ValueError, IndexError):
+                continue
+    
+    # Try Indonesian number words
+    for word, number in indonesian_numbers.items():
+        pattern = rf'{word}\s+(?:orang|penumpang)'
+        if re.search(pattern, text_lower):
+            logger.info(f"Detected passenger count (Indonesian): {number}")
+            return number
+    
+    # Default to 1 passenger
+    return 1
+
+
+def get_airport_from_city_code(city_code: str) -> Optional[str]:
+    """
+    Get primary airport code from city code using airports.dat database
+    
+    For cities with multiple airports (e.g., Tokyo has NRT and HND),
+    this returns the primary international airport.
+    
+    Args:
+        city_code: City code (e.g., "TYO", "OSA", "JKT")
+        
+    Returns:
+        Airport IATA code or None if not found
+    """
+    if not city_code:
+        return None
+    
+    city_code = city_code.strip().upper()
+    
+    # Manual mapping for common multi-airport cities
+    # Prioritize main international airports
+    city_to_airport = {
+        # City Codes
+        "TYO": "NRT", "OSA": "KIX", "JKT": "CGK", "NYC": "JFK",
+        "LON": "LHR", "PAR": "CDG", "BKK": "BKK", "SIN": "SIN",
+
+        # City Names (Indonesian & English)
+        "JAKARTA": "CGK", "BALI": "DPS", "DENPASAR": "DPS",
+        "SURABAYA": "SUB", "YOGYAKARTA": "YIA", "JOGJA": "YIA",
+        "MEDAN": "KNO", "MAKASSAR": "UPG",
+        "BANDUNG": "BDO", "PALEMBANG": "PLM", "BALIKPAPAN": "BPN",
+        "SEMARANG": "SRG", "PONTIANAK": "PNK", "PEKANBARU": "PKU",
+        "PADANG": "PDG", "BANDA ACEH": "BTJ", "JAYAPURA": "DJJ",
+        "MANADO": "MDC", "MATARAM": "LOP", "KUPANG": "KOE",
+        "SAMARINDA": "SRI", "PALANGKARAYA": "PKY", "TERNATE": "TTE",
+        "AMBON": "AMQ", "SORONG": "SOQ", "BIAK": "BIK", "TIMIKA": "TIM",
+        "JAYAPURA": "DJJ", "MERAUKE": "MKQ", "KENDARI": "KDI",
+
+        # International Cities
+        "SINGAPORE": "SIN", "SINGAPURA": "SIN",
+        "KUALA LUMPUR": "KUL", "PENANG": "PEN", "JOHOR BAHRU": "JHB",
+        "BANGKOK": "BKK", "PHUKET": "HKT", "CHIANG MAI": "CNX", "PATTAYA": "UTP",
+        "HO CHI MINH": "SGN", "HANOI": "HAN", "DA NANG": "DAD",
+        "SIEM REAP": "REP", "PHNOM PENH": "PNH",
+        "MANILA": "MNL", "CEBU": "CEB", "DAVAO": "DVO",
+
+        # Japan
+        "TOKYO": "NRT", "OSAKA": "KIX", "KYOTO": "KIX", "KOBE": "UKB",
+        "YOKOHAMA": "NRT", "NAGOYA": "NGO", "SAPPORO": "CTS", "FUKUOKA": "FUK",
+        "HIROSHIMA": "HIJ", "SENDAI": "SDJ", "KITAKYUSHU": "KKJ",
+
+        # Korea
+        "SEOUL": "ICN", "BUSAN": "PUS", "JEJU": "CJU", "DAEGU": "TAE",
+
+        # China
+        "BEIJING": "PEK", "SHANGHAI": "PVG", "GUANGZHOU": "CAN",
+        "SHENZHEN": "SZX", "CHENGDU": "CTU", "HONG KONG": "HKG",
+        "MACAU": "MFM", "TAIPEI": "TPE", "KAOHSIUNG": "KHH",
+
+        # India & South Asia
+        "NEW DELHI": "DEL", "MUMBAI": "BOM", "BANGALORE": "BLR",
+        "CHENNAI": "MAA", "KOLKATA": "CCU", "COLOMBO": "CMB", "MALE": "MLE",
+
+        # Middle East
+        "DUBAI": "DXB", "ABU DHABI": "AUH", "DOHA": "DOH",
+        "RIYADH": "RUH", "JEDDAH": "JED", "KUWAIT": "KWI",
+        "MANAMA": "BAH", "MUSCAT": "MCT",
+
+        # Australia & NZ
+        "SYDNEY": "SYD", "MELBOURNE": "MEL", "PERTH": "PER",
+        "BRISBANE": "BNE", "ADELAIDE": "ADL", "CANBERRA": "CBR",
+        "GOLD COAST": "OOL", "CAIRNS": "CNS", "AUCKLAND": "AKL",
+        "WELLINGTON": "WLG", "CHRISTCHURCH": "CHC",
+
+        # Europe
+        "LONDON": "LHR", "PARIS": "CDG", "AMSTERDAM": "AMS",
+        "ROME": "FCO", "MILAN": "MXP", "BARCELONA": "BCN",
+        "MADRID": "MAD", "BERLIN": "BER", "FRANKFURT": "FRA",
+        "ZURICH": "ZRH", "VIENNA": "VIE", "PRAGUE": "PRG",
+        "BUDAPEST": "BUD", "WARSAW": "WAW", "ATHENS": "ATH",
+        "ISTANBUL": "IST", "MOSCOW": "SVO", "ST PETERSBURG": "LED",
+
+        # Americas
+        "NEW YORK": "JFK", "LOS ANGELES": "LAX", "SAN FRANCISCO": "SFO",
+        "CHICAGO": "ORD", "MIAMI": "MIA", "TORONTO": "YYZ",
+        "VANCOUVER": "YVR", "MONTREAL": "YUL", "MEXICO CITY": "MEX",
+        "SAO PAULO": "GRU", "RIO DE JANEIRO": "GIG", "BUENOS AIRES": "EZE",
+        "SANTIAGO": "SCL", "LIMA": "LIM", "BOGOTA": "BOG",
+
+        # Africa
+        "JOHANNESBURG": "JNB", "CAPE TOWN": "CPT", "CAIRO": "CAI",
+        "LAGOS": "LOS", "NAIROBI": "NBO", "ADDIS ABABA": "ADD",
+        "DAR ES SALAAM": "DAR", "CASABLANCA": "CMN", "TUNIS": "TUN",
+    }
+    
+    if city_code in city_to_airport:
+        logger.info(f"Mapped city code {city_code} -> {city_to_airport[city_code]}")
+        return city_to_airport[city_code]
+    
+    # If not in manual mapping, assume it's already an airport code
+    return city_code
+
+
 def extract_flight_details_from_response(response_text: str) -> Optional[Dict[str, str]]:
     """
     Extract flight details from Gemini response
@@ -870,28 +1235,638 @@ def extract_flight_details_from_response(response_text: str) -> Optional[Dict[st
     This looks for patterns like:
     - Airport codes (JKT, DPS, SIN, etc)
     - Dates (YYYY-MM-DD or DD/MM/YYYY)
+    - Date ranges (2026-01-17 dan 2026-01-31)
+    - Passenger counts (2 orang, 3 passengers)
     - City names
 
     Args:
         response_text: Gemini's response
 
     Returns:
-        Dictionary with 'origin', 'destination', 'date' or None
+        Dictionary with 'origin', 'destination', 'date'/'date_range', 'adults' or None
     """
     # Look for airport codes
     codes = re.findall(r"\b([A-Z]{3})\b", response_text)
+    
+    # Normalize city codes to airport codes
+    if len(codes) >= 2:
+        codes[0] = get_airport_from_city_code(codes[0]) or codes[0]
+        codes[1] = get_airport_from_city_code(codes[1]) or codes[1]
 
-    # Look for dates
+    # Try to extract date range first (priority)
+    date_range = extract_date_range_from_text(response_text)
+
+    # Extract passenger count
+    passenger_count = extract_passenger_count(response_text)
+
+    # Initialize origin/destination from codes if available
+    origin = codes[0] if len(codes) >= 1 else None
+    destination = codes[1] if len(codes) >= 2 else None
+
+    # If we found a date range and airport codes
+    if len(codes) >= 2 and date_range:
+        logger.info(f"Extracted flight details with date range: {codes[0]} -> {codes[1]}, {date_range[0]} to {date_range[1]}, {passenger_count} pax")
+        return {
+            "origin": codes[0],
+            "destination": codes[1],
+            "date_range": date_range,
+            "adults": passenger_count
+        }
+
+    # Otherwise, try single date
     date = extract_date_from_text(response_text)
 
-    # Simple heuristic: if we found at least 2 codes and a date, it's likely a flight request
+    # If we found codes and a single date
     if len(codes) >= 2 and date:
-        return {"origin": codes[0], "destination": codes[1], "date": date}
+        logger.info(f"Extracted flight details: {codes[0]} -> {codes[1]} on {date}, {passenger_count} pax")
+        return {
+            "origin": codes[0],
+            "destination": codes[1],
+            "date": date,
+            "adults": passenger_count
+        }
 
-    # If only found 2 codes but no date, might still be valid
-    if len(codes) >= 2 and not date:
-        logger.warning(f"Found airport codes {codes[0]}, {codes[1]} but no date")
-        return None  # Require date for safety
+    # If only found 2 codes but no date
+    if len(codes) >= 2 and not date and not date_range:
+        logger.info(f"Found airport codes {codes[0]}, {codes[1]} but no date, {passenger_count} pax")
+        return {
+            "origin": codes[0],
+            "destination": codes[1],
+            "adults": passenger_count
+        }
+
+    # Fallback: Try to extract city names if no airport codes found
+    if not origin or not destination:
+        # Common city to airport mapping
+        city_to_airport = {
+            "JAKARTA": "CGK", "SURABAYA": "SUB", "BALI": "DPS", "DENPASAR": "DPS",
+            "MEDAN": "KNO", "MAKASSAR": "UPG", "BANDUNG": "BDO", "SEMARANG": "SRG",
+            "YOGYAKARTA": "YIA", "JOGJA": "YIA",
+            "TOKYO": "NRT", "OSAKA": "KIX", "KYOTO": "KIX",
+            "SINGAPORE": "SIN", "KUALA LUMPUR": "KUL", "BANGKOK": "BKK",
+            "MANILA": "MNL", "HANOI": "HAN", "HO CHI MINH": "SGN",
+            "SEOUL": "ICN", "HONG KONG": "HKG", "TAIPEI": "TPE",
+            "BEIJING": "PEK", "SHANGHAI": "PVG", "DUBAI": "DXB"
+        }
+
+        # Look for "[city] ke [city]" pattern
+        from_pattern = r"([A-Za-z]+)\s+ke\s+([A-Za-z]+)"
+        match = re.search(from_pattern, response_text, re.IGNORECASE)
+
+        logger.debug(f"Looking for city pattern in: {response_text}")
+        logger.debug(f"Pattern match: {match}")
+
+        if match:
+            from_city = match.group(1).strip().upper()
+            to_city = match.group(2).strip().upper()
+
+            # Clean up city names
+            from_city = from_city.split()[0]
+            to_city = to_city.split()[0]
+
+            origin = city_to_airport.get(from_city)
+            destination = city_to_airport.get(to_city)
+
+            if origin and destination:
+                logger.info(f"Found cities: {from_city} -> {to_city}, mapped to {origin} -> {destination}")
+
+                # Return with extracted details
+                if date_range:
+                    return {
+                        "origin": origin,
+                        "destination": destination,
+                        "date_range": date_range,
+                        "adults": passenger_count
+                    }
+                elif date:
+                    return {
+                        "origin": origin,
+                        "destination": destination,
+                        "date": date,
+                        "adults": passenger_count
+                    }
+                else:
+                    return {
+                        "origin": origin,
+                        "destination": destination,
+                        "adults": passenger_count
+                    }
 
     logger.debug(f"Could not extract complete flight details from response")
     return None
+
+
+# ============================================================================
+# SMART BEST FLIGHT SCORING SYSTEM
+# ============================================================================
+
+# Airline quality ratings (1-5 scale based on reputation, service, reliability)
+AIRLINE_QUALITY_RATINGS = {
+    # Premium Indonesian airlines
+    "GA": 4.5,  # Garuda Indonesia - Flag carrier, premium service
+    "QZ": 4.0,  # AirAsia Indonesia - LCC but reliable
+
+    # Good regional airlines
+    "SQ": 5.0,  # Singapore Airlines - Excellent
+    "MH": 4.5,  # Malaysia Airlines - Good service
+    "TG": 4.0,  # Thai Airways - Reliable
+    "PR": 4.0,  # Philippine Airlines - Decent
+    "CX": 4.5,  # Cathay Pacific - Excellent
+    "BR": 4.0,  # EVA Air - Good
+
+    # Indonesian LCCs
+    "JT": 3.0,  # Lion Air - Budget, variable quality
+    "ID": 3.5,  # Batik Air - Better than Lion
+    "OD": 3.5,  # Malindo Air - Decent hybrid
+    "SJ": 2.5,  # Sriwijaya Air - Budget
+    "IW": 2.5,  # Wings Air - Regional, basic
+    "GA": 4.5,  # Garuda (duplicate for Citilink below)
+
+    # Regional LCCs
+    "AK": 3.5,  # AirAsia Malaysia
+    "FD": 3.0,  # Thai AirAsia
+    "Z2": 3.0,  # Zip Air - Budget
+    "SL": 3.0,  # Thai Lion Air
+
+    # International
+    "EK": 5.0,  # Emirates - Excellent
+    "QR": 5.0,  # Qatar Airways - Excellent
+    "NH": 4.5,  # ANA - Excellent
+    "JL": 4.5,  # Japan Airlines - Excellent
+    "OZ": 4.0,  # Asiana - Good
+    "KE": 4.0,  # Korean Air - Good
+}
+
+def get_airline_quality_score(airline_code: str) -> float:
+    """
+    Get airline quality rating (1-5 scale)
+
+    Args:
+        airline_code: IATA airline code
+
+    Returns:
+        Quality score from 1-5, defaults to 3.0 (average)
+    """
+    return AIRLINE_QUALITY_RATINGS.get(airline_code, 3.0)
+
+
+def calculate_flight_score(
+    flight: Dict[str, Any],
+    min_price: float,
+    max_price: float,
+    origin: str,
+    destination: str
+) -> float:
+    """
+    Calculate a composite score for a flight based on multiple factors
+
+    Scoring factors (configurable weights):
+    - Price: 40% (lower is better)
+    - Airline Quality: 30% (higher is better)
+    - Duration: 15% (shorter is better)
+    - Stops: 15% (fewer is better)
+
+    Args:
+        flight: Flight data dictionary
+        min_price: Minimum price in the result set
+        max_price: Maximum price in the result set
+        origin: Origin airport code
+        destination: Destination airport code
+
+    Returns:
+        Composite score (0-100, higher is better)
+    """
+    try:
+        # Extract price
+        price = float(flight.get("price", {}).get("grandTotal", 0))
+
+        # Extract airline code
+        itineraries = flight.get("itineraries", [])
+        if not itineraries:
+            return 50.0  # Neutral score if no data
+
+        segments = itineraries[0].get("segments", [])
+        if not segments:
+            return 50.0
+
+        # Get airline code
+        airline_code = segments[0].get("operating", {}).get("carrierCode", "")
+        if not airline_code:
+            airline_code = segments[0].get("carrierCode", "")
+
+        # Get duration in minutes
+        duration_iso = itineraries[0].get("duration", "")
+        duration_minutes = parse_duration_to_minutes(duration_iso)
+
+        # Count stops
+        stops = len(segments) - 1
+
+        # === CALCULATE SCORES ===
+
+        # 1. Price score (40% weight) - lower price = higher score
+        if max_price > min_price:
+            price_score = 100 * (1 - (price - min_price) / (max_price - min_price))
+        else:
+            price_score = 50.0
+
+        # 2. Airline quality score (30% weight) - 1-5 scale converted to 0-100
+        quality = get_airline_quality_score(airline_code)
+        quality_score = (quality / 5.0) * 100
+
+        # 3. Duration score (15% weight) - shorter is better
+        # Assuming reasonable range: 1-10 hours
+        if duration_minutes > 0:
+            duration_score = max(0, 100 * (1 - (duration_minutes - 60) / 540))
+            duration_score = min(100, duration_score)
+        else:
+            duration_score = 50.0
+
+        # 4. Stops score (15% weight) - fewer is better
+        if stops == 0:
+            stops_score = 100.0  # Direct flight
+        elif stops == 1:
+            stops_score = 70.0   # One stop
+        else:
+            stops_score = 40.0   # Multiple stops
+
+        # === COMPOSITE SCORE ===
+        composite_score = (
+            (price_score * 0.40) +
+            (quality_score * 0.30) +
+            (duration_score * 0.15) +
+            (stops_score * 0.15)
+        )
+
+        logger.debug(
+            f"Flight score: {composite_score:.1f} | "
+            f"Price: {price_score:.1f}, Quality: {quality_score:.1f}, "
+            f"Duration: {duration_score:.1f}, Stops: {stops_score:.1f} | "
+            f"Airline: {airline_code}, Price: {price:.0f}"
+        )
+
+        return composite_score
+
+    except Exception as e:
+        logger.warning(f"Error calculating flight score: {e}")
+        return 50.0  # Neutral score on error
+
+
+def parse_duration_to_minutes(duration_iso: str) -> int:
+    """
+    Parse ISO 8601 duration to minutes
+
+    Args:
+        duration_iso: Duration in ISO format (e.g., "PT2H30M")
+
+    Returns:
+        Duration in minutes
+    """
+    try:
+        import re
+        match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?', duration_iso)
+        if match:
+            hours = int(match.group(1) or 0)
+            minutes = int(match.group(2) or 0)
+            return hours * 60 + minutes
+        return 0
+    except Exception:
+        return 0
+
+
+def find_best_flight(
+    flights_with_dates: list,
+    origin: str,
+    destination: str
+) -> tuple:
+    """
+    Find the best flight using smart scoring (not just cheapest)
+
+    Args:
+        flights_with_dates: List of (date, price, flight_data) tuples
+        origin: Origin airport code
+        destination: Destination airport code
+
+    Returns:
+        Tuple of (best_flight, best_date, best_score, all_scores)
+    """
+    if not flights_with_dates:
+        return None, None, 0.0, []
+
+    # Calculate min/max prices for normalization
+    prices = [price for _, price, _ in flights_with_dates]
+    min_price = min(prices) if prices else 0
+    max_price = max(prices) if prices else 0
+
+    logger.info(f"Scoring {len(flights_with_dates)} flights (price range: {min_price:.0f} - {max_price:.0f})")
+
+    # Score all flights
+    scored_flights = []
+    for date, price, flight in flights_with_dates:
+        score = calculate_flight_score(flight, min_price, max_price, origin, destination)
+        scored_flights.append((score, date, price, flight))
+
+    # Sort by score (highest first)
+    scored_flights.sort(key=lambda x: x[0], reverse=True)
+
+    # Get the best one
+    best_score, best_date, best_price, best_flight = scored_flights[0]
+
+    logger.info(f"Best flight: {best_date} | Score: {best_score:.1f} | Price: {best_price:.0f}")
+
+    return best_flight, best_date, best_score, scored_flights
+
+
+
+def search_flights_in_date_range(
+    origin: str,
+    destination: str,
+    start_date: str,
+    end_date: str,
+    adults: int = 1,
+    max_searches: int = 30
+) -> Dict[str, Any]:
+    """
+    Search for cheapest flight across a date range
+    
+    This function searches multiple dates to find the best deal.
+    It's smart about API usage and provides progress feedback.
+    
+    Args:
+        origin: Origin airport code
+        destination: Destination airport code
+        start_date: Start of date range (YYYY-MM-DD)
+        end_date: End of date range (YYYY-MM-DD)
+        adults: Number of passengers
+        max_searches: Maximum number of API calls to make (safety limit)
+        
+    Returns:
+        Dictionary with:
+        - success: bool
+        - cheapest_flight: flight data or None
+        - cheapest_date: date string or None
+        - cheapest_price: price or None
+        - all_results: list of (date, price, flight_data) tuples
+        - error: error message if failed
+    """
+    try:
+        from datetime import datetime, timedelta
+        
+        # Parse dates
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        
+        # Calculate number of days
+        delta = end_dt - start_dt
+        num_days = delta.days + 1
+        
+        if num_days > max_searches:
+            logger.warning(f"Date range too large ({num_days} days), limiting to {max_searches} days")
+            num_days = max_searches
+        
+        logger.info(f"Searching {num_days} dates from {start_date} to {end_date}")
+
+        all_results = []
+
+        # Search each date
+        for i in range(num_days):
+            current_date = start_dt + timedelta(days=i)
+            date_str = current_date.strftime("%Y-%m-%d")
+
+            logger.info(f"Searching date {i+1}/{num_days}: {date_str}")
+
+            # Search flights for this date
+            result = search_flights(origin, destination, date_str, adults)
+
+            if result["success"] and result["data"]:
+                # Get all flights for this date
+                flights = result["data"]
+
+                for flight in flights:
+                    try:
+                        price = float(flight.get("price", {}).get("grandTotal", float('inf')))
+
+                        # Store this result
+                        all_results.append((date_str, price, flight))
+
+                    except (ValueError, TypeError):
+                        continue
+
+        if all_results:
+            # Use smart scoring to find the best flight
+            best_flight, best_date, best_score, scored_flights = find_best_flight(
+                all_results, origin, destination
+            )
+
+            # Get the price of the best flight
+            best_price = float(best_flight.get("price", {}).get("grandTotal", 0))
+
+            logger.info(f"Found best flight on {best_date} | Score: {best_score:.1f} | Price: {best_price:.0f}")
+
+            return {
+                "success": True,
+                "cheapest_flight": best_flight,  # Keeping key name for compatibility
+                "cheapest_date": best_date,
+                "cheapest_price": best_price,
+                "all_results": all_results,
+                "best_score": best_score,  # New: Score for transparency
+                "scored_flights": scored_flights[:5],  # New: Top 5 scored flights
+                "error": None
+            }
+        else:
+            logger.warning("No flights found in date range")
+            return {
+                "success": False,
+                "cheapest_flight": None,
+                "cheapest_date": None,
+                "cheapest_price": None,
+                "all_results": [],
+                "best_score": 0,
+                "scored_flights": [],
+                "error": "🔍 Maaf, belum ada jadwal penerbangan untuk tanggal yang dipilih. Coba tanggal lain yang lebih dekat ya! Atau bilang 'cari yang termurah' biar aku carikan opsi terbaik dalam 7 hari ke depan. ✈️"
+            }
+
+    except Exception as e:
+        logger.error(f"Error in date range search: {e}", exc_info=True)
+        return {
+            "success": False,
+            "cheapest_flight": None,
+            "cheapest_date": None,
+            "cheapest_price": None,
+            "all_results": [],
+            "best_score": 0,
+            "scored_flights": [],
+            "error": f"⚠️ Maaf, ada masalah saat mencari tiket. Coba lagi dalam beberapa detik ya! 😊"
+        }
+
+
+def search_cheapest_flight_next_week(
+    origin: str,
+    destination: str,
+    adults: int = 1
+) -> Dict[str, Any]:
+    """
+    Convenience function to search for best flight in the next 7 days using smart scoring
+
+    This is the default smart search that balances price, quality, and convenience.
+
+    Args:
+        origin: Origin airport code
+        destination: Destination airport code
+        adults: Number of passengers
+
+    Returns:
+        Same format as search_flights_in_date_range
+    """
+    from datetime import datetime, timedelta
+
+    today = datetime.now()
+    # Start from tomorrow to avoid Amadeus API 400 error (same-day booking not allowed)
+    start_date = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+    end_date = (today + timedelta(days=7)).strftime("%Y-%m-%d")
+
+    logger.info(f"Searching best flight for next week: {start_date} to {end_date}")
+
+    return search_flights_in_date_range(
+        origin=origin,
+        destination=destination,
+        start_date=start_date,
+        end_date=end_date,
+        adults=adults,
+        max_searches=7
+    )
+
+
+def format_date_range_results(result: Dict[str, Any], origin: str, destination: str) -> str:
+    """
+    Format date range search results for display using smart best scoring
+
+    Args:
+        result: Result from search_flights_in_date_range
+        origin: Origin airport code
+        destination: Destination airport code
+
+    Returns:
+        Formatted string for display
+    """
+    if not result["success"]:
+        return f"❌ {result.get('error', 'No flights found')}"
+
+    best_flight = result["cheapest_flight"]  # Keeping key for compatibility
+    best_date = result["cheapest_date"]
+    best_price = result["cheapest_price"]
+    best_score = result.get("best_score", 0)
+    scored_flights = result.get("scored_flights", [])
+
+    # Smart recommendation based on score
+    if best_score >= 75:
+        recommendation_text = "✨ **Rekomendasi Terbaik Ditemukan!**"
+        subtitle = "Pilihan tepat - harga & kualitas seimbang"
+    elif best_score >= 60:
+        recommendation_text = "🎯 **Pilihan Terbaik Untuk Kamu!**"
+        subtitle = "Value terbaik antara harga dan kenyamanan"
+    else:
+        recommendation_text = "💡 **Pilihan Tersedia**"
+        subtitle = "Berikut opsi terbaik dari hasil pencarian"
+
+    formatted = f"{recommendation_text}\n"
+    formatted += f"📊 *{subtitle}*\n\n"
+    formatted += f"📅 **Tanggal**: {best_date}\n"
+
+    # Get price in IDR
+    price = best_flight.get("price", {})
+    currency = price.get("currency", "EUR")
+
+    if currency != "IDR":
+        try:
+            rate = get_exchange_rate(currency, "IDR")
+            if rate:
+                price_idr = best_price * rate
+                formatted += f"💰 **Harga**: Rp {price_idr:,.0f}\n"
+            else:
+                formatted += f"💰 **Harga**: {currency} {best_price}\n"
+        except:
+            formatted += f"💰 **Harga**: {currency} {best_price}\n"
+    else:
+        formatted += f"💰 **Harga**: Rp {best_price:,.0f}\n"
+
+    # Get flight details
+    itineraries = best_flight.get("itineraries", [])
+    if itineraries:
+        first_leg = itineraries[0]
+        segments = first_leg.get("segments", [])
+
+        if segments:
+            first_segment = segments[0]
+            last_segment = segments[-1]
+
+            departure = first_segment.get("departure", {})
+            arrival = last_segment.get("arrival", {})
+
+            departure_time = departure.get("at", "N/A").replace("T", " ")
+            arrival_time = arrival.get("at", "N/A").replace("T", " ")
+
+            # Get airline
+            airline_code = first_segment.get("operating", {}).get("carrierCode", "")
+            if not airline_code:
+                airline_code = first_segment.get("carrierCode", "")
+
+            origin_airport = departure.get("iataCode", "")
+            dest_airport = arrival.get("iataCode", "")
+            airline_name = get_airline_name_safe(airline_code, origin_airport, dest_airport)
+
+            # Get airline quality for badge
+            quality_score = get_airline_quality_score(airline_code)
+            if quality_score >= 4.5:
+                quality_badge = "⭐⭐⭐⭐⭐ Premium"
+            elif quality_score >= 4.0:
+                quality_badge = "⭐⭐⭐⭐ Bagus"
+            elif quality_score >= 3.0:
+                quality_badge = "⭐⭐⭐ Standar"
+            else:
+                quality_badge = "⭐⭐ Hemat"
+
+            # Duration
+            duration_iso = first_leg.get("duration", "")
+            duration_readable = format_duration(duration_iso)
+
+            formatted += f"✈️  **Maskapai**: {airline_name} ({quality_badge})\n"
+            formatted += f"🛫 **Berangkat**: {departure_time}\n"
+            formatted += f"🛬 **Tiba**: {arrival_time}\n"
+            formatted += f"⏱️  **Durasi**: {duration_readable}\n"
+            formatted += f"📍 **Transit**: {len(segments) - 1} kali\n"
+
+    # Add score breakdown for transparency
+    if best_score > 0:
+        formatted += f"\n📊 **Score**: {best_score:.0f}/100 (berdasarkan harga, kualitas maskapai, durasi & transit)\n"
+
+    # Show top alternatives if available
+    if scored_flights and len(scored_flights) > 1:
+        formatted += f"\n💡 **Opsi Lainnya**:\n"
+        for i, (score, date, price, flight) in enumerate(scored_flights[1:4], 2):  # Show next 3
+            if score > 50:  # Only show decent options
+                # Get airline for this flight
+                try:
+                    itin = flight.get("itineraries", [{}])[0]
+                    segs = itin.get("segments", [])
+                    if segs:
+                        code = segs[0].get("operating", {}).get("carrierCode", segs[0].get("carrierCode", ""))
+                        name = get_airline_name_safe(code, origin, destination)
+
+                        # Format price
+                        curr = flight.get("price", {}).get("currency", "IDR")
+                        pr = float(price)
+                        if curr != "IDR":
+                            rate = get_exchange_rate(curr, "IDR")
+                            if rate:
+                                pr_fmt = f"Rp {pr * rate:,.0f}"
+                            else:
+                                pr_fmt = f"{curr} {pr:.0f}"
+                        else:
+                            pr_fmt = f"Rp {pr:,.0f}"
+
+                        formatted += f"  {i}. {name} - {date} | {pr_fmt} | Score: {score:.0f}\n"
+                except:
+                    continue
+
+    return formatted
+

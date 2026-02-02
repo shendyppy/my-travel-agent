@@ -142,6 +142,20 @@ AMADEUS_CLIENT_SECRET = os.getenv("AMADEUS_CLIENT_SECRET")
 AMADEUS_CONFIGURED = bool(AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET)
 
 # ============================================================================
+# GOOGLE FLIGHTS API CONFIGURATION (via RapidAPI)
+# ============================================================================
+
+# RapidAPI credentials for Google Flights
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
+RAPIDAPI_HOST = os.getenv("RAPIDAPI_HOST", "google-flights-data.p.rapidapi.com")
+
+# Enable/disable Google Flights as primary provider
+GOOGLE_FLIGHTS_ENABLED = os.getenv("GOOGLE_FLIGHTS_ENABLED", "true").lower() == "true"
+
+# Check if Google Flights credentials are available
+GOOGLE_FLIGHTS_CONFIGURED = bool(RAPIDAPI_KEY)
+
+# ============================================================================
 # LOGGING CONFIGURATION
 # ============================================================================
 
@@ -153,3 +167,25 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 # Log file location (optional, comment out to disable file logging)
 LOG_FILE = "travel_buddy.log"
+
+# ============================================================================
+# SMART FLIGHT SEARCH CONFIGURATION
+# ============================================================================
+
+# Default date range for automatic "cheapest" search (in days)
+# 7 days = 1 week, balances API cost with finding good deals
+DEFAULT_DATE_RANGE_DAYS = 7
+
+# Maximum number of API calls allowed in a single date range search
+# Safety limit to prevent excessive API usage
+MAX_DATE_SEARCH_CALLS = 30
+
+# Trip context storage file location
+TRIP_CONTEXT_FILE = "data/trip_contexts.json"
+
+# Enable/disable booking links feature
+ENABLE_BOOKING_LINKS = True
+
+# Enable/disable season intelligence recommendations
+ENABLE_SEASON_INTELLIGENCE = True
+

@@ -29,19 +29,34 @@ if sys.platform == 'win32':
 
 from dotenv import load_dotenv # type: ignore
 
-from agent import TravelAgent
-from config import (
-    LOG_LEVEL,
-    LOG_FORMAT,
-    LOG_FILE,
-    UI_HEADER,
-    UI_INSTRUCTIONS,
-    UI_EXIT_MESSAGE,
-    UI_THINKING,
-    ERROR_API_KEY_MISSING,
-    ERROR_NETWORK,
-    ERROR_API,
-)
+try:
+    from src.agent import TravelAgent
+    from src.config import (
+        LOG_LEVEL,
+        LOG_FORMAT,
+        LOG_FILE,
+        UI_HEADER,
+        UI_INSTRUCTIONS,
+        UI_EXIT_MESSAGE,
+        UI_THINKING,
+        ERROR_API_KEY_MISSING,
+        ERROR_NETWORK,
+        ERROR_API,
+    )
+except ImportError:
+    from agent import TravelAgent
+    from config import (
+        LOG_LEVEL,
+        LOG_FORMAT,
+        LOG_FILE,
+        UI_HEADER,
+        UI_INSTRUCTIONS,
+        UI_EXIT_MESSAGE,
+        UI_THINKING,
+        ERROR_API_KEY_MISSING,
+        ERROR_NETWORK,
+        ERROR_API,
+    )
 
 # ============================================================================
 # LOGGING SETUP

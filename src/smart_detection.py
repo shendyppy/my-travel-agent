@@ -12,8 +12,12 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 
-from destination_lookup import DestinationDatabase
-from intelligent_date_generator import IntelligentDateGenerator
+try:
+    from src.destination_lookup import DestinationDatabase
+    from src.intelligent_date_generator import IntelligentDateGenerator
+except ImportError:
+    from destination_lookup import DestinationDatabase
+    from intelligent_date_generator import IntelligentDateGenerator
 
 @dataclass
 class FlightSuggestion:
@@ -137,20 +141,29 @@ class LocationDetector:
         if detected_destination:
             dest_info = DestinationDatabase.detect_destination(detected_destination)
             if dest_info:
-                # Use the main city/destination name consistently
-                primary_city = dest_info.popular_cities[0] if dest_info.popular_cities else dest_info.name
-                # Create destination dict for detected location
-                suggestions.append({
-                    "name": primary_city,  # Use city name instead of country name
-                    "code": dest_info.airport_codes[0] if dest_info.airport_codes else "UNKNOWN",
-                    "full_name": f"{primary_city} ({dest_info.airport_codes[0] if dest_info.airport_codes else ''})",
-                    "country": dest_info.country,
-                    "region": dest_info.region
-                })
-
-                # Add similar destinations in the same region (only if different from detected destination)
-                region_destinations = cls._get_similar_destinations(dest_info.region, primary_city)
-                suggestions.extend(region_destinations[:2])
+                # Add all popular cities from the detected destination
+                # For example, if user says "Japan", add Tokyo, Osaka, etc.
+                for city in dest_info.popular_cities[:3]:  # Top 3 cities from same country
+                    # Find airport code for this city
+                    airport_code = None
+                    if dest_info.airport_codes:
+                        # Match city to airport code (simplified - take in order)
+                        city_index = dest_info.popular_cities.index(city)
+                        if city_index < len(dest_info.airport_codes):
+                            airport_code = dest_info.airport_codes[city_index]
+                        else:
+                            airport_code = dest_info.airport_codes[0]  # Default to first
+                    
+                    suggestions.append({
+                        "name": city,
+                        "code": airport_code if airport_code else "UNKNOWN",
+                        "full_name": f"{city} ({airport_code if airport_code else ''})",
+                        "country": dest_info.country,
+                        "region": dest_info.region
+                    })
+                
+                # If less than 3 cities, we're good with what we have
+                # Don't add "similar destinations" from other countries
 
         # If origin is Indonesia and no specific destination mentioned
         elif origin in [city["code"] for city in cls.INDONESIAN_CITIES.values()]:
